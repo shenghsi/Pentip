@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
+
 # Zed
 
 [![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
@@ -9,7 +12,21 @@ Welcome to Zed, a high-performance, multiplayer code editor from the creators of
 
 ### Installation
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+Download release files from the [Pentip GitHub Releases page](https://github.com/shenghsi/Pentip/releases/latest).
+
+Install the latest Pentip release on macOS or Linux:
+
+```sh
+curl -f https://raw.githubusercontent.com/shenghsi/Pentip/main/script/install.sh | sh
+```
+
+Install a specific release version:
+
+```sh
+curl -f https://raw.githubusercontent.com/shenghsi/Pentip/main/script/install.sh | ZED_VERSION=v0.0.1 sh
+```
+
+The installer puts the `zed` command in `~/.local/bin`. Add this directory to your `PATH` if needed.
 
 Other platforms are not yet available:
 

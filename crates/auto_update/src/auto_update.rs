@@ -109,16 +109,6 @@ actions!(
     ]
 );
 
-#[derive(Serialize, Debug)]
-pub struct AssetQuery<'a> {
-    asset: &'a str,
-    os: &'a str,
-    arch: &'a str,
-    metrics_id: Option<&'a str>,
-    system_id: Option<&'a str>,
-    is_staff: Option<bool>,
-}
-
 #[derive(Clone, Debug)]
 pub enum AutoUpdateStatus {
     Idle,
@@ -339,21 +329,18 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
 
 pub fn release_notes_url(cx: &mut App) -> Option<String> {
     let release_channel = ReleaseChannel::try_global(cx)?;
+    let auto_updater = AutoUpdater::get(cx)?;
+    let mut current_version = auto_updater.read(cx).current_version.clone();
+    current_version.pre = semver::Prerelease::EMPTY;
+    current_version.build = semver::BuildMetadata::EMPTY;
     let url = match release_channel {
         ReleaseChannel::Stable | ReleaseChannel::Preview => {
-            let auto_updater = AutoUpdater::get(cx)?;
-            let auto_updater = auto_updater.read(cx);
-            let mut current_version = auto_updater.current_version.clone();
-            current_version.pre = semver::Prerelease::EMPTY;
-            current_version.build = semver::BuildMetadata::EMPTY;
-            let release_channel = release_channel.dev_name();
-            let path = format!("/releases/{release_channel}/{current_version}");
-            auto_updater.client.http_client().build_url(&path)
+            format!("https://github.com/shenghsi/Pentip/releases/tag/v{current_version}")
         }
         ReleaseChannel::Nightly => {
-            "https://github.com/zed-industries/zed/commits/nightly/".to_string()
+            "https://github.com/shenghsi/Pentip/releases/tag/nightly".to_string()
         }
-        ReleaseChannel::Dev => "https://github.com/zed-industries/zed/commits/main/".to_string(),
+        ReleaseChannel::Dev => "https://github.com/shenghsi/Pentip/commits/main".to_string(),
     };
     Some(url)
 }
@@ -677,17 +664,6 @@ impl AutoUpdater {
         cx: &mut AsyncApp,
     ) -> Result<ReleaseAsset> {
         let client = this.read_with(cx, |this, _| this.client.clone());
-
-        let (system_id, metrics_id, is_staff) = if client.telemetry().metrics_enabled() {
-            (
-                client.telemetry().system_id(),
-                client.telemetry().metrics_id(),
-                client.telemetry().is_staff(),
-            )
-        } else {
-            (None, None, None)
-        };
-
         let version = if let Some(mut version) = version {
             version.pre = semver::Prerelease::EMPTY;
             version.build = semver::BuildMetadata::EMPTY;
@@ -696,38 +672,21 @@ impl AutoUpdater {
             "latest".to_string()
         };
         let http_client = client.http_client();
-
-        let path = format!("/releases/{}/{}/asset", release_channel.dev_name(), version,);
-        let url = http_client.build_zed_cloud_url_with_query(
-            &path,
-            AssetQuery {
-                os,
-                arch,
-                asset,
-                metrics_id: metrics_id.as_deref(),
-                system_id: system_id.as_deref(),
-                is_staff,
+        let asset_name = match asset {
+            "zed-remote-server" => {
+                let extension = if os == "windows" { "zip" } else { "gz" };
+                format!("zed-remote-server-{os}-{arch}.{extension}")
+            }
+            "zed" => match os {
+                "macos" => format!("Zed-{arch}.dmg"),
+                "linux" => format!("zed-linux-{arch}.tar.gz"),
+                "windows" => format!("Zed-{arch}.exe"),
+                unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
             },
-        )?;
+            other => anyhow::bail!("unknown release asset: {other}"),
+        };
 
-        let mut response = http_client
-            .get(url.as_str(), Default::default(), true)
-            .await?;
-        let mut body = Vec::new();
-        response.body_mut().read_to_end(&mut body).await?;
-
-        anyhow::ensure!(
-            response.status().is_success(),
-            "failed to fetch release: {:?}",
-            String::from_utf8_lossy(&body),
-        );
-
-        serde_json::from_slice(body.as_slice()).with_context(|| {
-            format!(
-                "error deserializing release {:?}",
-                String::from_utf8_lossy(&body),
-            )
-        })
+        get_release_from_github(release_channel, &version, &asset_name, http_client).await
     }
 
     async fn update(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
@@ -861,10 +820,9 @@ impl AutoUpdater {
         fetched_version: String,
         status: AutoUpdateStatus,
     ) -> Result<Option<Version>> {
-        let fetched_version = fetched_version.parse::<Version>()?;
-
         match release_channel {
             ReleaseChannel::Nightly => {
+                let fetched_version = Version::parse(&format!("0.0.0+{fetched_version}"))?;
                 let should_download = if let AutoUpdateStatus::Updated { version } = status {
                     fetched_version != version
                 } else {
@@ -877,6 +835,9 @@ impl AutoUpdater {
                 Ok(should_download.then_some(fetched_version))
             }
             _ => {
+                let fetched_version = fetched_version
+                    .trim_start_matches(['v', 'V'])
+                    .parse::<Version>()?;
                 let current_version = if let AutoUpdateStatus::Updated { version } = status {
                     version
                 } else {
@@ -983,6 +944,79 @@ impl AutoUpdater {
             Ok(kvp.read_kvp(SHOULD_SHOW_UPDATE_NOTIFICATION_KEY)?.is_some())
         })
     }
+}
+
+async fn get_release_from_github(
+    release_channel: ReleaseChannel,
+    version: &str,
+    asset_name: &str,
+    http_client: Arc<dyn HttpClient>,
+) -> Result<ReleaseAsset> {
+    const REPOSITORY: &str = "shenghsi/Pentip";
+
+    let release = match release_channel {
+        ReleaseChannel::Nightly => {
+            http_client::github::get_release_by_tag_name(REPOSITORY, "nightly", http_client.clone())
+                .await?
+        }
+        _ if version == "latest" => {
+            let pre_release = matches!(release_channel, ReleaseChannel::Preview);
+            http_client::github::latest_github_release(
+                REPOSITORY,
+                true,
+                pre_release,
+                http_client.clone(),
+            )
+            .await?
+        }
+        _ => {
+            let tag = format!("v{version}");
+            http_client::github::get_release_by_tag_name(REPOSITORY, &tag, http_client.clone())
+                .await?
+        }
+    };
+
+    let version = if release_channel == ReleaseChannel::Nightly {
+        let version_asset = release
+            .assets
+            .iter()
+            .find(|asset| asset.name == "latest-sha")
+            .context("no asset named latest-sha in nightly release")?;
+        download_release_version(&version_asset.browser_download_url, http_client).await?
+    } else {
+        release.tag_name.clone()
+    };
+
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == asset_name)
+        .with_context(|| {
+            format!(
+                "no asset named {asset_name} in release {}",
+                release.tag_name
+            )
+        })?;
+
+    Ok(ReleaseAsset {
+        version,
+        url: asset.browser_download_url.clone(),
+    })
+}
+
+async fn download_release_version(url: &str, http_client: Arc<dyn HttpClient>) -> Result<String> {
+    let mut response = http_client.get(url, Default::default(), true).await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "failed to download release version: {:?}",
+        response.status()
+    );
+
+    let mut version = String::new();
+    response.body_mut().read_to_string(&mut version).await?;
+    let version = version.trim();
+    anyhow::ensure!(!version.is_empty(), "downloaded release version is empty");
+    Ok(version.to_owned())
 }
 
 async fn download_remote_server_binary(
@@ -1396,6 +1430,7 @@ mod tests {
         let (dmg_tx, dmg_rx) = oneshot::channel::<String>();
 
         cx.update(|cx| {
+            cx.set_global(db::AppDatabase::test_new());
             settings::init(cx);
 
             let current_version = semver::Version::new(0, 100, 0);
@@ -1404,27 +1439,58 @@ mod tests {
             let clock = Arc::new(FakeSystemClock::new());
             let release_available = Arc::clone(&release_available);
             let dmg_rx = Arc::new(parking_lot::Mutex::new(Some(dmg_rx)));
+            let asset_name = match OS {
+                "macos" => format!("Zed-{ARCH}.dmg"),
+                "linux" => format!("zed-linux-{ARCH}.tar.gz"),
+                "windows" => format!("Zed-{ARCH}.exe"),
+                unsupported_os => panic!("unsupported OS in test: {unsupported_os}"),
+            };
             let fake_client_http = FakeHttpClient::create(move |req| {
                 let release_available = release_available.load(atomic::Ordering::Relaxed);
                 let dmg_rx = dmg_rx.clone();
+                let asset_name = asset_name.clone();
                 async move {
-                if req.uri().path() == "/releases/stable/latest/asset" {
-                    if release_available {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.1","url":"https://test.example/new-download"}"#.into()
-                        ).unwrap());
-                    } else {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.0","url":"https://test.example/old-download"}"#.into()
-                        ).unwrap());
+                    if req.uri().path() == "/repos/shenghsi/Pentip/releases" {
+                        let (tag_name, download_url) = if release_available {
+                            ("v0.100.1", "https://test.example/new-download")
+                        } else {
+                            ("v0.100.0", "https://test.example/old-download")
+                        };
+                        return Ok(Response::builder()
+                            .status(200)
+                            .body(
+                                serde_json::json!([{
+                                    "tag_name": tag_name,
+                                    "prerelease": false,
+                                    "assets": [{
+                                        "name": asset_name,
+                                        "browser_download_url": download_url,
+                                        "digest": null,
+                                    }],
+                                    "tarball_url": "https://test.example/tarball",
+                                    "zipball_url": "https://test.example/zipball",
+                                }])
+                                .to_string()
+                                .into(),
+                            )
+                            .expect("valid response"));
                     }
-                } else if req.uri().path() == "/new-download" {
-                    return Ok(Response::builder().status(200).body({
-                        let dmg_rx = dmg_rx.lock().take().unwrap();
-                        dmg_rx.await.unwrap().into()
-                    }).unwrap());
-                }
-                Ok(Response::builder().status(404).body("".into()).unwrap())
+                    if req.uri().path() == "/new-download" {
+                        return Ok(Response::builder()
+                            .status(200)
+                            .body({
+                                let dmg_rx = dmg_rx
+                                    .lock()
+                                    .take()
+                                    .expect("download receiver is available");
+                                dmg_rx.await.expect("download body is available").into()
+                            })
+                            .expect("valid response"));
+                    }
+                    Ok(Response::builder()
+                        .status(404)
+                        .body("".into())
+                        .expect("valid response"))
                 }
             });
             let client = Client::new(clock, fake_client_http, cx);
