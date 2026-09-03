@@ -771,8 +771,8 @@ jobs:
         mv ./artifacts/zed-remote-server-linux-x86_64.gz/zed-remote-server-linux-x86_64.gz release-artifacts/zed-remote-server-linux-x86_64.gz
         mv ./artifacts/zed-remote-server-windows-aarch64.zip/zed-remote-server-windows-aarch64.zip release-artifacts/zed-remote-server-windows-aarch64.zip
         mv ./artifacts/zed-remote-server-windows-x86_64.zip/zed-remote-server-windows-x86_64.zip release-artifacts/zed-remote-server-windows-x86_64.zip
-    - name: gh release upload "$GITHUB_REF_NAME" --repo=zed-industries/zed release-artifacts/*
-      run: gh release upload "$GITHUB_REF_NAME" --repo=zed-industries/zed release-artifacts/*
+    - name: gh release upload "$GITHUB_REF_NAME" release-artifacts/*
+      run: gh release upload "$GITHUB_REF_NAME" release-artifacts/*
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   validate_release_assets:
@@ -787,7 +787,7 @@ jobs:
         EXPECTED_ASSETS='["Zed-aarch64.dmg", "Zed-x86_64.dmg", "zed-linux-aarch64.tar.gz", "zed-linux-x86_64.tar.gz", "bwrap-linux-aarch64.gz", "bwrap-linux-x86_64.gz", "Zed-x86_64.exe", "Zed-aarch64.exe", "zed-remote-server-macos-aarch64.gz", "zed-remote-server-macos-x86_64.gz", "zed-remote-server-linux-aarch64.gz", "zed-remote-server-linux-x86_64.gz", "zed-remote-server-windows-aarch64.zip", "zed-remote-server-windows-x86_64.zip"]'
         TAG="$GITHUB_REF_NAME"
 
-        ACTUAL_ASSETS=$(gh release view "$TAG" --repo=zed-industries/zed --json assets -q '[.assets[].name]')
+        ACTUAL_ASSETS=$(gh release view "$TAG" --json assets -q '[.assets[].name]')
 
         MISSING_ASSETS=$(echo "$EXPECTED_ASSETS" | jq -r --argjson actual "$ACTUAL_ASSETS" '. - $actual | .[]')
 
@@ -903,7 +903,7 @@ jobs:
         fi
 
         if [[ "$should_release" == "true" ]]; then
-            gh release edit "$tag" --repo=zed-industries/zed --draft=false
+            gh release edit "$tag" --draft=false
             release_published=true
         fi
 
@@ -943,7 +943,7 @@ jobs:
         MESSAGE=$(if [ "$DRAFT_RESULT" == "failure" ]; then
             echo "❌ Draft release creation failed for $TAG: $RUN_URL"
         else
-            RELEASE_URL=$(gh release view "$TAG" --repo=zed-industries/zed --json url -q '.url')
+            RELEASE_URL=$(gh release view "$TAG" --json url -q '.url')
             if [ "$UPLOAD_RESULT" == "failure" ]; then
                 echo "❌ Release asset upload failed for $TAG: $RELEASE_URL"
             elif [ "$UPLOAD_RESULT" == "cancelled" ] || [ "$UPLOAD_RESULT" == "skipped" ]; then
