@@ -17,7 +17,7 @@ use crate::tasks::workflows::{
 use super::{
     deploy_docs,
     runners::{self, Arch, Platform},
-    steps::{self, FluentBuilder, NamedJob, named, release_job},
+    steps::{self, FluentBuilder, NamedJob, OwnerGuard, named, release_job, release_job_with_guard},
 };
 
 pub(crate) fn run_tests() -> Workflow {
@@ -51,17 +51,18 @@ pub(crate) fn run_tests() -> Workflow {
         check_style(),
         should_run_tests
             .and_not_in_merge_queue()
-            .then(clippy(Platform::Windows, None, true)),
+            .then(clippy(Platform::Windows, None, true, OwnerGuard::Restricted)),
         should_run_tests
             .and_always()
-            .then(clippy(Platform::Linux, None, true)),
+            .then(clippy(Platform::Linux, None, true, OwnerGuard::Restricted)),
         should_run_tests
             .and_not_in_merge_queue()
-            .then(clippy(Platform::Mac, None, true)),
+            .then(clippy(Platform::Mac, None, true, OwnerGuard::Restricted)),
         should_run_tests.and_not_in_merge_queue().then(clippy(
             Platform::Mac,
             Some(Arch::X86_64),
             true,
+            OwnerGuard::Restricted,
         )),
         should_run_tests
             .and_not_in_merge_queue()
@@ -92,7 +93,9 @@ pub(crate) fn run_tests() -> Workflow {
         should_check_licences
             .and_not_in_merge_queue()
             .then(check_licenses()),
-        should_check_scripts.and_always().then(check_scripts(true)),
+        should_check_scripts
+            .and_always()
+            .then(check_scripts(true, OwnerGuard::Restricted)),
     ];
     let ext_tests = extension_tests();
     let tests_pass = tests_pass(&jobs, &[&ext_tests.name]);
@@ -541,7 +544,7 @@ fn check_workspace_binaries() -> NamedJob {
     ))
 }
 
-pub(crate) fn clippy(platform: Platform, arch: Option<Arch>, harden: bool) -> NamedJob {
+pub(crate) fn clippy(platform: Platform, arch: Option<Arch>, harden: bool, guard: OwnerGuard) -> NamedJob {
     let target = arch.map(|arch| match (platform, arch) {
         (Platform::Mac, Arch::X86_64) => "x86_64-apple-darwin",
         (Platform::Mac, Arch::AARCH64) => "aarch64-apple-darwin",
@@ -552,7 +555,7 @@ pub(crate) fn clippy(platform: Platform, arch: Option<Arch>, harden: bool) -> Na
         Platform::Linux => runners::LINUX_DEFAULT,
         Platform::Mac => runners::MAC_DEFAULT,
     };
-    let mut job = release_job(&[])
+    let mut job = release_job_with_guard(&[], guard)
         .runs_on(runner)
         .when(harden && platform == Platform::Linux, |this| {
             this.add_step(steps::harden_runner())
@@ -584,14 +587,19 @@ pub(crate) fn clippy(platform: Platform, arch: Option<Arch>, harden: bool) -> Na
 }
 
 pub(crate) fn run_platform_tests(platform: Platform) -> NamedJob {
-    run_platform_tests_impl(platform, true, true)
+    run_platform_tests_impl(platform, true, true, OwnerGuard::Restricted)
 }
 
-pub(crate) fn run_platform_tests_no_filter(platform: Platform) -> NamedJob {
-    run_platform_tests_impl(platform, false, false)
+pub(crate) fn run_platform_tests_no_filter(platform: Platform, guard: OwnerGuard) -> NamedJob {
+    run_platform_tests_impl(platform, false, false, guard)
 }
 
-fn run_platform_tests_impl(platform: Platform, filter_packages: bool, harden: bool) -> NamedJob {
+fn run_platform_tests_impl(
+    platform: Platform,
+    filter_packages: bool,
+    harden: bool,
+    guard: OwnerGuard,
+) -> NamedJob {
     let runner = match platform {
         Platform::Windows => runners::WINDOWS_DEFAULT,
         Platform::Linux => runners::LINUX_DEFAULT,
@@ -599,7 +607,7 @@ fn run_platform_tests_impl(platform: Platform, filter_packages: bool, harden: bo
     };
     NamedJob {
         name: format!("run_tests_{platform}"),
-        job: release_job(&[])
+        job: release_job_with_guard(&[], guard)
             .runs_on(runner)
             .when(platform == Platform::Linux, |job| {
                 job.add_service(
@@ -787,7 +795,7 @@ fn check_licenses() -> NamedJob {
     )
 }
 
-pub(crate) fn check_scripts(harden: bool) -> NamedJob {
+pub(crate) fn check_scripts(harden: bool, guard: OwnerGuard) -> NamedJob {
     fn download_actionlint() -> Step<Run> {
         named::bash(
             "bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)",
@@ -828,7 +836,7 @@ pub(crate) fn check_scripts(harden: bool) -> NamedJob {
     }
 
     named::job(
-        release_job(&[])
+        release_job_with_guard(&[], guard)
             .runs_on(runners::LINUX_LARGE)
             .when(harden, |this| this.add_step(steps::harden_runner()))
             .add_step(steps::checkout_repo())

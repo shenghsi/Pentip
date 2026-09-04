@@ -400,6 +400,23 @@ pub(crate) fn release_job(deps: &[&NamedJob]) -> Job {
         .timeout_minutes(60u32)
 }
 
+/// Whether a job restricts itself to the zed-industries/zed-extensions orgs.
+/// Some `run_tests` jobs are shared between workflows that keep the
+/// restriction (e.g. nightly releases) and this fork's stable release
+/// pipeline, which needs to actually run them - a per-call-site choice
+/// rather than baking one answer into `release_job()`.
+pub(crate) enum OwnerGuard {
+    Restricted,
+    Unrestricted,
+}
+
+pub(crate) fn release_job_with_guard(deps: &[&NamedJob], guard: OwnerGuard) -> Job {
+    match guard {
+        OwnerGuard::Restricted => release_job(deps),
+        OwnerGuard::Unrestricted => dependant_job(deps).timeout_minutes(60u32),
+    }
+}
+
 pub(crate) fn dependant_job(deps: &[&NamedJob]) -> Job {
     let job = Job::default();
     if deps.len() > 0 {
