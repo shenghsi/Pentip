@@ -265,13 +265,18 @@ pub fn install_rustup_target(target: &str) -> Step<Run> {
 }
 
 pub fn cache_rust_dependencies_namespace() -> Step<Use> {
+    // nscloud-cache-action requires the job to run on a Namespace Cloud
+    // runner (it errors "requires a cache volume to be configured" on
+    // GitHub's standard hosted runners), which forks don't have. Use
+    // GitHub's own cache action instead - functionally equivalent, just
+    // without Namespace's persistent cache volumes.
     named::uses(
-        "namespacelabs",
-        "nscloud-cache-action",
-        "a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9", // v1
+        "actions",
+        "cache",
+        "0057852bfaa89a56745cba8c7296529d2fc39830", // v4.3.0
     )
-    .add_with(("cache", "rust"))
     .add_with(("path", "~/.rustup"))
+    .add_with(("key", "${{ runner.os }}-${{ runner.arch }}-rustup"))
 }
 
 pub fn setup_sccache(platform: Platform) -> Step<Run> {
@@ -298,24 +303,30 @@ pub fn show_sccache_stats(platform: Platform) -> Step<Run> {
 }
 
 pub fn cache_nix_dependencies_namespace() -> Step<Use> {
+    // See cache_rust_dependencies_namespace() - nscloud-cache-action doesn't
+    // work on standard GitHub-hosted runners, so this uses actions/cache.
     named::uses(
-        "namespacelabs",
-        "nscloud-cache-action",
-        "a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9", // v1
+        "actions",
+        "cache",
+        "0057852bfaa89a56745cba8c7296529d2fc39830", // v4.3.0
     )
-    .add_with(("cache", "nix"))
+    .add_with(("path", "/nix"))
+    .add_with(("key", "${{ runner.os }}-${{ runner.arch }}-nix"))
 }
 
 pub fn cache_nix_store_macos() -> Step<Use> {
-    // On macOS, `/nix` is on a read-only root filesystem so nscloud's `cache: nix`
-    // cannot mount or symlink there. Instead we cache a user-writable directory and
-    // use nix-store --import/--export in separate steps to transfer store paths.
+    // On macOS, `/nix` is on a read-only root filesystem so this can't mount
+    // or symlink there. Instead we cache a user-writable directory and use
+    // nix-store --import/--export in separate steps to transfer store paths.
+    // See cache_rust_dependencies_namespace() for why this is actions/cache
+    // rather than nscloud-cache-action.
     named::uses(
-        "namespacelabs",
-        "nscloud-cache-action",
-        "a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9", // v1
+        "actions",
+        "cache",
+        "0057852bfaa89a56745cba8c7296529d2fc39830", // v4.3.0
     )
     .add_with(("path", "~/nix-cache"))
+    .add_with(("key", "${{ runner.os }}-${{ runner.arch }}-nix-cache"))
 }
 
 pub fn setup_linux() -> Step<Run> {
