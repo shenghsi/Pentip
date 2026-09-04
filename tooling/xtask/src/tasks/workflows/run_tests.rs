@@ -563,7 +563,7 @@ pub(crate) fn clippy(platform: Platform, arch: Option<Arch>, harden: bool, guard
         .add_step(steps::checkout_repo())
         .add_step(steps::setup_cargo_config(platform))
         .when(
-            platform == Platform::Linux || platform == Platform::Mac,
+            guard == OwnerGuard::Restricted && (platform == Platform::Linux || platform == Platform::Mac),
             |this| this.add_step(steps::cache_rust_dependencies_namespace()),
         )
         .when(
@@ -628,12 +628,15 @@ fn run_platform_tests_impl(
             })
             .add_step(steps::checkout_repo())
             .add_step(steps::setup_cargo_config(platform))
-            .when(platform == Platform::Mac, |this| {
-                this.add_step(steps::cache_rust_dependencies_namespace())
-            })
-            .when(platform == Platform::Linux, |this| {
-                use_clang(this.add_step(steps::cache_rust_dependencies_namespace()))
-            })
+            .when(
+                guard == OwnerGuard::Restricted && platform == Platform::Mac,
+                |this| this.add_step(steps::cache_rust_dependencies_namespace()),
+            )
+            .when(
+                guard == OwnerGuard::Restricted && platform == Platform::Linux,
+                |this| this.add_step(steps::cache_rust_dependencies_namespace()),
+            )
+            .when(platform == Platform::Linux, use_clang)
             .when(platform == Platform::Linux, |job| {
                 job.add_step(steps::setup_linux())
             })
@@ -841,7 +844,9 @@ pub(crate) fn check_scripts(harden: bool, guard: OwnerGuard) -> NamedJob {
             .when(harden, |this| this.add_step(steps::harden_runner()))
             .add_step(steps::checkout_repo())
             .add_step(run_shellcheck())
-            .add_step(cache_rust_dependencies_namespace())
+            .when(guard == OwnerGuard::Restricted, |this| {
+                this.add_step(cache_rust_dependencies_namespace())
+            })
             .add_step(check_xtask_workflows())
             .add_step(download_actionlint().id("get_actionlint"))
             .add_step(run_actionlint())

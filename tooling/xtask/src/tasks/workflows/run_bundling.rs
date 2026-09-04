@@ -4,8 +4,8 @@ use crate::tasks::workflows::{
     release::ReleaseBundleJobs,
     runners::{Arch, Platform, ReleaseChannel},
     steps::{
-        CommonPermissionSets, FluentBuilder, IfNoFilesFound, NamedJob, UploadArtifactStep,
-        dependant_job, named,
+        CommonPermissionSets, FluentBuilder, IfNoFilesFound, NamedJob, OwnerGuard,
+        UploadArtifactStep, dependant_job, named,
     },
     vars::{self, assets, bundle_envs},
 };
@@ -16,12 +16,12 @@ use indoc::indoc;
 
 pub fn run_bundling() -> Workflow {
     let bundle = ReleaseBundleJobs {
-        linux_aarch64: bundle_linux(Arch::AARCH64, None, &[]),
-        linux_x86_64: bundle_linux(Arch::X86_64, None, &[]),
-        bwrap_linux_aarch64: build_static_bwrap(Arch::AARCH64, &[]),
-        bwrap_linux_x86_64: build_static_bwrap(Arch::X86_64, &[]),
-        mac_aarch64: bundle_mac(Arch::AARCH64, None, &[]),
-        mac_x86_64: bundle_mac(Arch::X86_64, None, &[]),
+        linux_aarch64: bundle_linux(Arch::AARCH64, None, &[], OwnerGuard::Restricted),
+        linux_x86_64: bundle_linux(Arch::X86_64, None, &[], OwnerGuard::Restricted),
+        bwrap_linux_aarch64: build_static_bwrap(Arch::AARCH64, &[], OwnerGuard::Restricted),
+        bwrap_linux_x86_64: build_static_bwrap(Arch::X86_64, &[], OwnerGuard::Restricted),
+        mac_aarch64: bundle_mac(Arch::AARCH64, None, &[], OwnerGuard::Restricted),
+        mac_x86_64: bundle_mac(Arch::X86_64, None, &[], OwnerGuard::Restricted),
         windows_aarch64: bundle_windows(Arch::AARCH64, None, &[]),
         windows_x86_64: bundle_windows(Arch::X86_64, None, &[]),
     };
@@ -61,6 +61,7 @@ pub(crate) fn bundle_mac(
     arch: Arch,
     release_channel: Option<ReleaseChannel>,
     deps: &[&NamedJob],
+    guard: OwnerGuard,
 ) -> NamedJob {
     pub fn bundle_mac(arch: Arch) -> Step<Run> {
         named::bash(&format!("./script/bundle-mac {arch}-apple-darwin"))
@@ -80,7 +81,9 @@ pub(crate) fn bundle_mac(
             .runs_on(runners::MAC_DEFAULT)
             .envs(bundle_envs(platform))
             .add_step(steps::checkout_repo())
-            .add_step(steps::cache_rust_dependencies_namespace())
+            .when(guard == OwnerGuard::Restricted, |job| {
+                job.add_step(steps::cache_rust_dependencies_namespace())
+            })
             .when_some(release_channel, |job, release_channel| {
                 job.add_step(set_release_channel(platform, release_channel))
             })
@@ -102,7 +105,7 @@ pub fn upload_artifact(path: &str) -> UploadArtifactStep {
     steps::upload_artifact(name, path).if_no_files_found(IfNoFilesFound::Error)
 }
 
-pub(crate) fn build_static_bwrap(arch: Arch, deps: &[&NamedJob]) -> NamedJob {
+pub(crate) fn build_static_bwrap(arch: Arch, deps: &[&NamedJob], guard: OwnerGuard) -> NamedJob {
     let artifact_name = match arch {
         Arch::X86_64 => assets::BWRAP_LINUX_X86_64,
         Arch::AARCH64 => assets::BWRAP_LINUX_AARCH64,
@@ -121,7 +124,9 @@ pub(crate) fn build_static_bwrap(arch: Arch, deps: &[&NamedJob]) -> NamedJob {
         job: bundle_job(deps)
             .runs_on(arch.linux_bundler())
             .timeout_minutes(60u32)
-            .add_step(steps::cache_nix_dependencies_namespace())
+            .when(guard == OwnerGuard::Restricted, |job| {
+                job.add_step(steps::cache_nix_dependencies_namespace())
+            })
             .add_step(
                 named::uses(
                     "cachix",
@@ -150,6 +155,7 @@ pub(crate) fn bundle_linux(
     arch: Arch,
     release_channel: Option<ReleaseChannel>,
     deps: &[&NamedJob],
+    guard: OwnerGuard,
 ) -> NamedJob {
     let platform = Platform::Linux;
     let artifact_name = match arch {
@@ -168,7 +174,9 @@ pub(crate) fn bundle_linux(
             .add_env(Env::new("CC", "clang-18"))
             .add_env(Env::new("CXX", "clang++-18"))
             .add_step(steps::checkout_repo())
-            .add_step(steps::cache_rust_dependencies_namespace())
+            .when(guard == OwnerGuard::Restricted, |job| {
+                job.add_step(steps::cache_rust_dependencies_namespace())
+            })
             .when_some(release_channel, |job, release_channel| {
                 job.add_step(set_release_channel(platform, release_channel))
             })

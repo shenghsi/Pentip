@@ -404,7 +404,11 @@ pub(crate) fn release_job(deps: &[&NamedJob]) -> Job {
 /// Some `run_tests` jobs are shared between workflows that keep the
 /// restriction (e.g. nightly releases) and this fork's stable release
 /// pipeline, which needs to actually run them - a per-call-site choice
-/// rather than baking one answer into `release_job()`.
+/// rather than baking one answer into `release_job()`. `Unrestricted` jobs
+/// also skip dependency caching: zizmor flags `actions/cache` as a
+/// cache-poisoning risk in a workflow that both accepts `workflow_dispatch`
+/// and publishes release artifacts, which every `Unrestricted` job does.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OwnerGuard {
     Restricted,
     Unrestricted,

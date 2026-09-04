@@ -69,6 +69,7 @@ pub(crate) fn release() -> Workflow {
                 Arch::AARCH64,
                 None,
                 &[&linux_tests, &linux_clippy, &check_scripts],
+                OwnerGuard::Unrestricted,
             ),
             runners::GITHUB_LINUX,
         ),
@@ -77,15 +78,24 @@ pub(crate) fn release() -> Workflow {
                 Arch::X86_64,
                 None,
                 &[&linux_tests, &linux_clippy, &check_scripts],
+                OwnerGuard::Unrestricted,
             ),
             runners::GITHUB_LINUX,
         ),
         bwrap_linux_aarch64: on_standard_runner(
-            build_static_bwrap(Arch::AARCH64, &[&linux_tests, &linux_clippy, &check_scripts]),
+            build_static_bwrap(
+                Arch::AARCH64,
+                &[&linux_tests, &linux_clippy, &check_scripts],
+                OwnerGuard::Unrestricted,
+            ),
             runners::GITHUB_LINUX,
         ),
         bwrap_linux_x86_64: on_standard_runner(
-            build_static_bwrap(Arch::X86_64, &[&linux_tests, &linux_clippy, &check_scripts]),
+            build_static_bwrap(
+                Arch::X86_64,
+                &[&linux_tests, &linux_clippy, &check_scripts],
+                OwnerGuard::Unrestricted,
+            ),
             runners::GITHUB_LINUX,
         ),
         mac_aarch64: on_standard_runner(
@@ -93,6 +103,7 @@ pub(crate) fn release() -> Workflow {
                 Arch::AARCH64,
                 None,
                 &[&macos_tests, &macos_clippy, &check_scripts],
+                OwnerGuard::Unrestricted,
             ),
             runners::GITHUB_MAC,
         ),
@@ -101,6 +112,7 @@ pub(crate) fn release() -> Workflow {
                 Arch::X86_64,
                 None,
                 &[&macos_tests, &macos_clippy, &check_scripts],
+                OwnerGuard::Unrestricted,
             ),
             runners::GITHUB_MAC,
         ),
@@ -361,14 +373,11 @@ pub(crate) fn add_compliance_steps(
 }
 
 fn compliance_check() -> (NamedJob, JobOutput) {
-    let job = release_job(&[])
-        .runs_on(runners::LINUX_SMALL)
-        .add_step(
-            steps::checkout_repo()
-                .with_full_history()
-                .with_ref(Context::github().ref_()),
-        )
-        .add_step(steps::cache_rust_dependencies_namespace());
+    let job = release_job(&[]).runs_on(runners::LINUX_SMALL).add_step(
+        steps::checkout_repo()
+            .with_full_history()
+            .with_ref(Context::github().ref_()),
+    );
 
     let (compliance_job, check_result) =
         add_compliance_steps(job, ComplianceContext::ReleaseNonBlocking);
@@ -419,8 +428,7 @@ fn release_compliance_check(deps: &[&NamedJob], non_blocking_outcome: JobOutput)
             steps::checkout_repo()
                 .with_full_history()
                 .with_ref(Context::github().ref_()),
-        )
-        .add_step(steps::cache_rust_dependencies_namespace());
+        );
 
     let (job, _) = add_compliance_steps(
         job,
