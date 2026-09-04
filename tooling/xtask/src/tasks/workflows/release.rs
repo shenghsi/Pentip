@@ -545,9 +545,12 @@ fn upload_release_assets(deps: &[&NamedJob], bundle: &ReleaseBundleJobs) -> Name
 
 fn create_draft_release() -> NamedJob {
     fn generate_release_notes() -> Step<Run> {
+        // draft-release-notes shells out to `gh repo view` to find the
+        // current repo instead of hardcoding zed-industries/zed.
         named::bash(
             r#"node --redirect-warnings=/dev/null ./script/draft-release-notes "$RELEASE_VERSION" "$RELEASE_CHANNEL" > target/release-notes.md"#,
         )
+        .add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN))
     }
 
     fn create_release() -> Step<Run> {
