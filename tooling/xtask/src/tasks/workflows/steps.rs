@@ -242,6 +242,17 @@ pub fn cleanup_cargo_config(platform: Platform) -> Step<Run> {
     step.if_condition(Expression::new("always()"))
 }
 
+/// GitHub's standard hosted Linux runners ship with ~14GB free, most of it
+/// consumed by preinstalled toolchains (Android SDK, .NET, GHC, CodeQL) this
+/// build doesn't use. Zed's own CI runs on Namespace's larger runners and
+/// never needed this; a cold build of the whole workspace does on stock
+/// GitHub runners.
+pub fn free_disk_space_linux() -> Step<Run> {
+    named::bash(
+        "sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \"${AGENT_TOOLSDIRECTORY:-}\" || true",
+    )
+}
+
 pub fn clear_target_dir_if_large(platform: Platform) -> Step<Run> {
     match platform {
         Platform::Windows => named::pwsh("./script/clear-target-dir-if-larger-than.ps1 350 200"),
