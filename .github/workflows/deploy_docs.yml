@@ -95,11 +95,6 @@ jobs:
       run: |
         mkdir -p ./../.cargo
         cp ./.cargo/ci-config.toml ./../.cargo/config.toml
-    - name: steps::cache_rust_dependencies_namespace
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
-      with:
-        path: ~/.rustup
-        key: ${{ runner.os }}-${{ runner.arch }}-rustup
     - name: steps::setup_linux
       run: ./script/linux
     - name: steps::download_wasi_sdk

@@ -6,7 +6,7 @@ use gh_workflow::{
 use crate::tasks::workflows::{
     runners,
     steps::{
-        self, CommonJobConditions, CommonPermissionSets, FluentBuilder as _, NamedJob,
+        self, CommonJobConditions, CommonPermissionSets, FluentBuilder as _, NamedJob, OwnerGuard,
         UploadArtifactStep, named, release_job,
     },
     vars::{self, StepOutput, WorkflowInput},
@@ -80,6 +80,7 @@ fn docs_build_steps(
     checkout_ref: Option<String>,
     docs_channel: impl Into<String>,
     site_url: impl Into<String>,
+    cache: OwnerGuard,
 ) -> Job {
     let docs_channel = docs_channel.into();
     let site_url = site_url.into();
@@ -94,7 +95,9 @@ fn docs_build_steps(
             )
             .runs_on(runners::LINUX_XL)
             .add_step(steps::setup_cargo_config(runners::Platform::Linux))
-            .add_step(steps::cache_rust_dependencies_namespace())
+            .when(cache == OwnerGuard::Restricted, |job| {
+                job.add_step(steps::cache_rust_dependencies_namespace())
+            })
             .map(steps::install_linux_dependencies)
             .add_step(steps::script("./script/generate-action-metadata"))
             .add_step(lychee_link_check("./docs/src/**/*"))
@@ -166,6 +169,7 @@ pub(crate) fn check_docs() -> NamedJob {
             None,
             DocsChannel::Stable.channel_name(),
             DocsChannel::Stable.site_url(),
+            OwnerGuard::Restricted,
         ),
     }
 }
@@ -241,6 +245,7 @@ fn docs_job(channel_expr: impl Into<String>, checkout_ref: Option<String>) -> Na
                 checkout_ref,
                 channel.to_string(),
                 site_url.to_string(),
+                OwnerGuard::Unrestricted,
             ),
             &project_name,
         ),
