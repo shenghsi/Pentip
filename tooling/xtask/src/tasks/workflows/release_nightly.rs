@@ -9,7 +9,7 @@ use crate::tasks::workflows::{
     runners::{Arch, Platform, ReleaseChannel},
     steps::{
         CommonJobConditions, CommonPermissionSets, DEFAULT_REPOSITORY_OWNER_GUARD, FluentBuilder,
-        GitRef, NamedJob, RefSha, RepositoryTarget, TokenPermissions,
+        GitRef, NamedJob, OwnerGuard, RefSha, RepositoryTarget, TokenPermissions,
     },
 };
 
@@ -19,7 +19,7 @@ use gh_workflow::*;
 /// Generates the release_nightly.yml workflow
 pub fn release_nightly() -> Workflow {
     let (check_tag, skip) = check_nightly_tag();
-    let mut tests = run_platform_tests_no_filter(Platform::Linux);
+    let mut tests = run_platform_tests_no_filter(Platform::Linux, OwnerGuard::Restricted);
     tests.job = tests
         .job
         .needs([check_tag.name.clone()])

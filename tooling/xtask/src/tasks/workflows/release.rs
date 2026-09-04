@@ -9,7 +9,7 @@ use crate::tasks::workflows::{
     run_tests,
     runners::{self, Arch, Platform},
     steps::{
-        self, CommonPermissionSets, DownloadArtifactStep, FluentBuilder, NamedJob,
+        self, CommonPermissionSets, DownloadArtifactStep, FluentBuilder, NamedJob, OwnerGuard,
         dependant_job, named, release_job,
     },
     vars::{self, JobOutput, StepOutput, assets},
@@ -17,16 +17,6 @@ use crate::tasks::workflows::{
 
 const CURRENT_ACTION_RUN_URL: &str =
     "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}";
-
-/// `release_job()` (used throughout `run_tests`) bakes in a guard restricting
-/// it to the zed-industries/zed-extensions orgs. This fork needs these jobs to
-/// actually run, so the guard is overridden here rather than in `run_tests`,
-/// which is also used by workflows that intentionally keep the guard (e.g.
-/// nightly releases, which depend on zed-industries-only infrastructure).
-fn without_owner_guard(mut named: NamedJob) -> NamedJob {
-    named.job = named.job.cond(Expression::new("true"));
-    named
-}
 
 /// Zed's release jobs target its paid Namespace.so cloud runners (and a
 /// self-hosted Windows box) - none of which are available on this fork.
@@ -41,31 +31,31 @@ fn on_standard_runner(mut named: NamedJob, runner: runners::Runner) -> NamedJob 
 
 pub(crate) fn release() -> Workflow {
     let macos_tests = on_standard_runner(
-        without_owner_guard(run_tests::run_platform_tests_no_filter(Platform::Mac)),
+        run_tests::run_platform_tests_no_filter(Platform::Mac, OwnerGuard::Unrestricted),
         runners::GITHUB_MAC,
     );
     let linux_tests = on_standard_runner(
-        without_owner_guard(run_tests::run_platform_tests_no_filter(Platform::Linux)),
+        run_tests::run_platform_tests_no_filter(Platform::Linux, OwnerGuard::Unrestricted),
         runners::GITHUB_LINUX,
     );
     let windows_tests = on_standard_runner(
-        without_owner_guard(run_tests::run_platform_tests_no_filter(Platform::Windows)),
+        run_tests::run_platform_tests_no_filter(Platform::Windows, OwnerGuard::Unrestricted),
         runners::GITHUB_WINDOWS,
     );
     let macos_clippy = on_standard_runner(
-        without_owner_guard(run_tests::clippy(Platform::Mac, None, false)),
+        run_tests::clippy(Platform::Mac, None, false, OwnerGuard::Unrestricted),
         runners::GITHUB_MAC,
     );
     let linux_clippy = on_standard_runner(
-        without_owner_guard(run_tests::clippy(Platform::Linux, None, false)),
+        run_tests::clippy(Platform::Linux, None, false, OwnerGuard::Unrestricted),
         runners::GITHUB_LINUX,
     );
     let windows_clippy = on_standard_runner(
-        without_owner_guard(run_tests::clippy(Platform::Windows, None, false)),
+        run_tests::clippy(Platform::Windows, None, false, OwnerGuard::Unrestricted),
         runners::GITHUB_WINDOWS,
     );
     let check_scripts = on_standard_runner(
-        without_owner_guard(run_tests::check_scripts(false)),
+        run_tests::check_scripts(false, OwnerGuard::Unrestricted),
         runners::GITHUB_LINUX,
     );
 

@@ -13,7 +13,6 @@ permissions:
   contents: read
 jobs:
   run_tests_mac:
-    if: 'true'
     runs-on: macos-latest
     steps:
     - name: steps::checkout_repo
@@ -60,7 +59,6 @@ jobs:
         rm -rf ./../.cargo
     timeout-minutes: 60
   run_tests_linux:
-    if: 'true'
     runs-on: ubuntu-latest
     env:
       CC: clang
@@ -120,7 +118,6 @@ jobs:
         - 5432:5432
         options: --health-cmd pg_isready --health-interval 500ms --health-timeout 5s --health-retries 10
   run_tests_windows:
-    if: 'true'
     runs-on: windows-latest
     steps:
     - name: steps::checkout_repo
@@ -162,7 +159,6 @@ jobs:
       shell: pwsh
     timeout-minutes: 60
   clippy_mac:
-    if: 'true'
     runs-on: macos-latest
     steps:
     - name: steps::checkout_repo
@@ -191,7 +187,6 @@ jobs:
       run: sccache --show-stats || true
     timeout-minutes: 60
   clippy_linux:
-    if: 'true'
     runs-on: ubuntu-latest
     env:
       CC: clang
@@ -227,7 +222,6 @@ jobs:
       run: sccache --show-stats || true
     timeout-minutes: 60
   clippy_windows:
-    if: 'true'
     runs-on: windows-latest
     steps:
     - name: steps::checkout_repo
@@ -255,7 +249,6 @@ jobs:
       shell: pwsh
     timeout-minutes: 60
   check_scripts:
-    if: 'true'
     runs-on: ubuntu-latest
     steps:
     - name: steps::checkout_repo
