@@ -92,7 +92,7 @@ impl CheckoutStep {
         self.with_custom_fetch_depth("${{ github.ref == 'refs/heads/main' && 2 || 350 }}")
     }
 
-    pub fn with_token(mut self, token: &StepOutput) -> Self {
+    pub fn with_token(mut self, token: impl std::fmt::Display) -> Self {
         self.token = Some(token.to_string());
         self
     }
@@ -922,7 +922,7 @@ pub(crate) struct BotCommitStep {
 }
 
 impl BotCommitStep {
-    pub fn new(message: impl ToString, branch: impl ToString, token: &StepOutput) -> Self {
+    pub fn new(message: impl ToString, branch: impl ToString, token: impl std::fmt::Display) -> Self {
         Self {
             message: message.to_string(),
             branch: branch.to_string(),
@@ -1051,7 +1051,7 @@ impl From<RefOp> for Step<Use> {
 pub(crate) fn create_ref(
     git_ref: GitRef,
     sha: impl Into<RefSha>,
-    token: &StepOutput,
+    token: impl std::fmt::Display,
 ) -> impl Into<Step<Use>> {
     RefOp {
         git_ref,

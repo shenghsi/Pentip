@@ -14,6 +14,14 @@ pub const LINUX_LARGE_RAM: Runner = Runner("namespace-profile-8x32-ubuntu-2404")
 pub const MAC_DEFAULT: Runner = Runner("namespace-profile-mac-large");
 pub const WINDOWS_DEFAULT: Runner = Runner("self-32vcpu-windows-2022");
 
+// Every runner above is either a paid Namespace.so cloud profile or a
+// self-hosted box - both zed-industries-only infrastructure that a fork
+// doesn't have. These are GitHub's standard hosted runners, used instead for
+// release jobs on forks so they actually get scheduled.
+pub const GITHUB_LINUX: Runner = Runner("ubuntu-latest");
+pub const GITHUB_MAC: Runner = Runner("macos-latest");
+pub const GITHUB_WINDOWS: Runner = Runner("windows-latest");
+
 pub struct Runner(&'static str);
 
 impl Into<gh_workflow::RunsOn> for Runner {

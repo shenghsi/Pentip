@@ -1,5 +1,6 @@
 use gh_workflow::{
-    Event, Expression, Level, Permissions, Push, Run, Step, Use, Workflow, ctx::Context,
+    Event, Expression, Level, Permissions, Push, Run, Step, Use, Workflow, WorkflowDispatch,
+    ctx::Context,
 };
 use indoc::formatdoc;
 
@@ -9,7 +10,7 @@ use crate::tasks::workflows::{
     runners::{self, Arch, Platform},
     steps::{
         self, CommonPermissionSets, DownloadArtifactStep, FluentBuilder, NamedJob,
-        TokenPermissions, dependant_job, named, release_job,
+        dependant_job, named, release_job,
     },
     vars::{self, JobOutput, StepOutput, assets},
 };
@@ -17,91 +18,146 @@ use crate::tasks::workflows::{
 const CURRENT_ACTION_RUN_URL: &str =
     "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}";
 
-pub(crate) fn release() -> Workflow {
-    let macos_tests = run_tests::run_platform_tests_no_filter(Platform::Mac);
-    let linux_tests = run_tests::run_platform_tests_no_filter(Platform::Linux);
-    let windows_tests = run_tests::run_platform_tests_no_filter(Platform::Windows);
-    let macos_clippy = run_tests::clippy(Platform::Mac, None, false);
-    let linux_clippy = run_tests::clippy(Platform::Linux, None, false);
-    let windows_clippy = run_tests::clippy(Platform::Windows, None, false);
-    let check_scripts = run_tests::check_scripts(false);
+/// `release_job()` (used throughout `run_tests`) bakes in a guard restricting
+/// it to the zed-industries/zed-extensions orgs. This fork needs these jobs to
+/// actually run, so the guard is overridden here rather than in `run_tests`,
+/// which is also used by workflows that intentionally keep the guard (e.g.
+/// nightly releases, which depend on zed-industries-only infrastructure).
+fn without_owner_guard(mut named: NamedJob) -> NamedJob {
+    named.job = named.job.cond(Expression::new("true"));
+    named
+}
 
-    let create_draft_release = create_draft_release();
+/// Zed's release jobs target its paid Namespace.so cloud runners (and a
+/// self-hosted Windows box) - none of which are available on this fork.
+/// Swap in GitHub's standard hosted runners so jobs actually get scheduled.
+/// Note: Zed intentionally builds Linux release binaries on an older Ubuntu
+/// image for broad glibc compatibility; using ubuntu-latest here trades that
+/// away for something that runs today.
+fn on_standard_runner(mut named: NamedJob, runner: runners::Runner) -> NamedJob {
+    named.job = named.job.runs_on(runner);
+    named
+}
+
+pub(crate) fn release() -> Workflow {
+    let macos_tests = on_standard_runner(
+        without_owner_guard(run_tests::run_platform_tests_no_filter(Platform::Mac)),
+        runners::GITHUB_MAC,
+    );
+    let linux_tests = on_standard_runner(
+        without_owner_guard(run_tests::run_platform_tests_no_filter(Platform::Linux)),
+        runners::GITHUB_LINUX,
+    );
+    let windows_tests = on_standard_runner(
+        without_owner_guard(run_tests::run_platform_tests_no_filter(Platform::Windows)),
+        runners::GITHUB_WINDOWS,
+    );
+    let macos_clippy = on_standard_runner(
+        without_owner_guard(run_tests::clippy(Platform::Mac, None, false)),
+        runners::GITHUB_MAC,
+    );
+    let linux_clippy = on_standard_runner(
+        without_owner_guard(run_tests::clippy(Platform::Linux, None, false)),
+        runners::GITHUB_LINUX,
+    );
+    let windows_clippy = on_standard_runner(
+        without_owner_guard(run_tests::clippy(Platform::Windows, None, false)),
+        runners::GITHUB_WINDOWS,
+    );
+    let check_scripts = on_standard_runner(
+        without_owner_guard(run_tests::check_scripts(false)),
+        runners::GITHUB_LINUX,
+    );
+
+    let create_draft_release =
+        on_standard_runner(create_draft_release(), runners::GITHUB_LINUX);
     let (non_blocking_compliance_run, job_output) = compliance_check();
 
     let bundle = ReleaseBundleJobs {
-        linux_aarch64: bundle_linux(
-            Arch::AARCH64,
-            None,
-            &[&linux_tests, &linux_clippy, &check_scripts],
+        linux_aarch64: on_standard_runner(
+            bundle_linux(
+                Arch::AARCH64,
+                None,
+                &[&linux_tests, &linux_clippy, &check_scripts],
+            ),
+            runners::GITHUB_LINUX,
         ),
-        linux_x86_64: bundle_linux(
-            Arch::X86_64,
-            None,
-            &[&linux_tests, &linux_clippy, &check_scripts],
+        linux_x86_64: on_standard_runner(
+            bundle_linux(
+                Arch::X86_64,
+                None,
+                &[&linux_tests, &linux_clippy, &check_scripts],
+            ),
+            runners::GITHUB_LINUX,
         ),
-        bwrap_linux_aarch64: build_static_bwrap(
-            Arch::AARCH64,
-            &[&linux_tests, &linux_clippy, &check_scripts],
+        bwrap_linux_aarch64: on_standard_runner(
+            build_static_bwrap(Arch::AARCH64, &[&linux_tests, &linux_clippy, &check_scripts]),
+            runners::GITHUB_LINUX,
         ),
-        bwrap_linux_x86_64: build_static_bwrap(
-            Arch::X86_64,
-            &[&linux_tests, &linux_clippy, &check_scripts],
+        bwrap_linux_x86_64: on_standard_runner(
+            build_static_bwrap(Arch::X86_64, &[&linux_tests, &linux_clippy, &check_scripts]),
+            runners::GITHUB_LINUX,
         ),
-        mac_aarch64: bundle_mac(
-            Arch::AARCH64,
-            None,
-            &[&macos_tests, &macos_clippy, &check_scripts],
+        mac_aarch64: on_standard_runner(
+            bundle_mac(
+                Arch::AARCH64,
+                None,
+                &[&macos_tests, &macos_clippy, &check_scripts],
+            ),
+            runners::GITHUB_MAC,
         ),
-        mac_x86_64: bundle_mac(
-            Arch::X86_64,
-            None,
-            &[&macos_tests, &macos_clippy, &check_scripts],
+        mac_x86_64: on_standard_runner(
+            bundle_mac(
+                Arch::X86_64,
+                None,
+                &[&macos_tests, &macos_clippy, &check_scripts],
+            ),
+            runners::GITHUB_MAC,
         ),
-        windows_aarch64: bundle_windows(
-            Arch::AARCH64,
-            None,
-            &[&windows_tests, &windows_clippy, &check_scripts],
+        windows_aarch64: on_standard_runner(
+            bundle_windows(
+                Arch::AARCH64,
+                None,
+                &[&windows_tests, &windows_clippy, &check_scripts],
+            ),
+            runners::GITHUB_WINDOWS,
         ),
-        windows_x86_64: bundle_windows(
-            Arch::X86_64,
-            None,
-            &[&windows_tests, &windows_clippy, &check_scripts],
+        windows_x86_64: on_standard_runner(
+            bundle_windows(
+                Arch::X86_64,
+                None,
+                &[&windows_tests, &windows_clippy, &check_scripts],
+            ),
+            runners::GITHUB_WINDOWS,
         ),
     };
 
-    let upload_release_assets = upload_release_assets(&[&create_draft_release], &bundle);
-    let validate_release_assets = validate_release_assets(&[&upload_release_assets]);
+    let upload_release_assets = on_standard_runner(
+        upload_release_assets(&[&create_draft_release], &bundle),
+        runners::GITHUB_LINUX,
+    );
+    let validate_release_assets = on_standard_runner(
+        validate_release_assets(&[&upload_release_assets]),
+        runners::GITHUB_LINUX,
+    );
     let release_compliance = release_compliance_check(
         &[&upload_release_assets, &non_blocking_compliance_run],
         job_output,
     );
 
-    let (auto_release_preview, auto_release_published) =
-        auto_release_preview(&[&validate_release_assets, &release_compliance]);
-
-    let test_jobs = [
-        &macos_tests,
-        &linux_tests,
-        &windows_tests,
-        &macos_clippy,
-        &linux_clippy,
-        &windows_clippy,
-        &check_scripts,
-    ];
-    let push_slack_notification = push_release_update_notification(
-        &create_draft_release,
-        &upload_release_assets,
-        &validate_release_assets,
-        &release_compliance,
-        &auto_release_preview,
-        &auto_release_published,
-        &test_jobs,
-        &bundle,
-    );
+    let (auto_release_preview, _auto_release_published) = {
+        let (job, output) = auto_release_preview(&[&validate_release_assets, &release_compliance]);
+        (on_standard_runner(job, runners::GITHUB_LINUX), output)
+    };
 
     named::workflow()
-        .on(Event::default().push(Push::default().tags(vec!["v*".to_string()])))
+        .on(Event::default()
+            .push(Push::default().tags(vec!["v*".to_string()]))
+            // The tag created by bump_patch_version is pushed with the plain
+            // GITHUB_TOKEN, and GitHub Actions doesn't let a GITHUB_TOKEN-authored
+            // push trigger another workflow run. workflow_dispatch lets the tag be
+            // built manually instead: `gh workflow run release.yml --ref v0.0.2`.
+            .workflow_dispatch(WorkflowDispatch::default()))
         .concurrency(vars::one_workflow_per_non_main_branch())
         .with_minimal_permissions()
         .add_env(("CARGO_TERM_COLOR", "always"))
@@ -128,7 +184,6 @@ pub(crate) fn release() -> Workflow {
         .add_job(validate_release_assets.name, validate_release_assets.job)
         .add_job(release_compliance.name, release_compliance.job)
         .add_job(auto_release_preview.name, auto_release_preview.job)
-        .add_job(push_slack_notification.name, push_slack_notification.job)
 }
 
 pub(crate) struct ReleaseBundleJobs {
@@ -495,24 +550,24 @@ fn create_draft_release() -> NamedJob {
         )
     }
 
-    fn create_release(token: StepOutput) -> Step<Run> {
+    fn create_release() -> Step<Run> {
         named::bash("script/create-draft-release target/release-notes.md")
-            .add_env(("GITHUB_TOKEN", token.to_string()))
+            .add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN))
     }
 
-    let (authenticate_step, token) = steps::authenticate_as_zippy()
-        .for_repository(steps::RepositoryTarget::current())
-        .with_permissions([(TokenPermissions::Contents, Level::Write)])
-        .into();
-
     named::job(
-        release_job(&[])
+        // Not release_job(): that bakes in the zed-industries/zed-extensions org
+        // guard, and this job needs to actually run on a fork. Zed authenticates
+        // here as a custom GitHub App for a higher-scoped token; this fork uses
+        // GITHUB_TOKEN instead, so contents:write is granted explicitly below.
+        dependant_job(&[])
+            .timeout_minutes(60u32)
+            .permissions(Permissions::default().contents(Level::Write))
             .runs_on(runners::LINUX_SMALL)
             // We need to fetch more than one commit so that `script/draft-release-notes`
             // is able to diff between the current and previous tag.
             //
             // 25 was chosen arbitrarily.
-            .add_step(authenticate_step)
             .add_step(
                 steps::checkout_repo()
                     .with_custom_fetch_depth(25)
@@ -521,137 +576,8 @@ fn create_draft_release() -> NamedJob {
             .add_step(steps::script("script/determine-release-channel"))
             .add_step(steps::script("mkdir -p target/"))
             .add_step(generate_release_notes())
-            .add_step(create_release(token)),
+            .add_step(create_release()),
     )
-}
-
-pub(crate) fn push_release_update_notification(
-    create_draft_release_job: &NamedJob,
-    upload_assets_job: &NamedJob,
-    validate_assets_job: &NamedJob,
-    compliance_job: &NamedJob,
-    auto_release_preview: &NamedJob,
-    auto_release_published: &JobOutput,
-    test_jobs: &[&NamedJob],
-    bundle_jobs: &ReleaseBundleJobs,
-) -> NamedJob {
-    fn env_name(name: &str) -> String {
-        format!("RESULT_{}", name.to_uppercase())
-    }
-
-    let all_job_names: Vec<&str> = test_jobs
-        .iter()
-        .map(|j| j.name.as_ref())
-        .chain(bundle_jobs.jobs().into_iter().map(|j| j.name.as_ref()))
-        .collect();
-
-    let env_entries = [
-        (
-            "DRAFT_RESULT".into(),
-            format!("${{{{ needs.{}.result }}}}", create_draft_release_job.name),
-        ),
-        (
-            "UPLOAD_RESULT".into(),
-            format!("${{{{ needs.{}.result }}}}", upload_assets_job.name),
-        ),
-        (
-            "VALIDATE_RESULT".into(),
-            format!("${{{{ needs.{}.result }}}}", validate_assets_job.name),
-        ),
-        (
-            "COMPLIANCE_RESULT".into(),
-            format!("${{{{ needs.{}.result }}}}", compliance_job.name),
-        ),
-        (
-            "AUTO_RELEASE_RESULT".into(),
-            format!("${{{{ needs.{}.result }}}}", auto_release_preview.name),
-        ),
-        (
-            "AUTO_RELEASE_PUBLISHED".into(),
-            auto_release_published.to_string(),
-        ),
-        ("RUN_URL".into(), CURRENT_ACTION_RUN_URL.to_string()),
-        ("TAG".into(), Context::github().ref_name().to_string()),
-    ]
-    .into_iter()
-    .chain(
-        all_job_names
-            .iter()
-            .map(|name| (env_name(name), format!("${{{{ needs.{name}.result }}}}"))),
-    );
-
-    let failure_checks = all_job_names
-        .iter()
-        .map(|name| {
-            format!(
-                "if [ \"${env_name}\" == \"failure\" ];then FAILED_JOBS=\"$FAILED_JOBS {name}\"; fi",
-                    env_name = env_name(name)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n        ");
-
-    let notification_script = formatdoc! {r#"
-        if [ "$DRAFT_RESULT" == "failure" ]; then
-            echo "❌ Draft release creation failed for $TAG: $RUN_URL"
-        else
-            RELEASE_URL=$(gh release view "$TAG" --json url -q '.url')
-            if [ "$UPLOAD_RESULT" == "failure" ]; then
-                echo "❌ Release asset upload failed for $TAG: $RELEASE_URL"
-            elif [ "$UPLOAD_RESULT" == "cancelled" ] || [ "$UPLOAD_RESULT" == "skipped" ]; then
-                FAILED_JOBS=""
-                {failure_checks}
-                FAILED_JOBS=$(echo "$FAILED_JOBS" | xargs)
-                if [ "$UPLOAD_RESULT" == "cancelled" ]; then
-                    if [ -n "$FAILED_JOBS" ]; then
-                        echo "❌ Release job for $TAG was cancelled, most likely because tests \`$FAILED_JOBS\` failed: $RUN_URL"
-                    else
-                        echo "❌ Release job for $TAG was cancelled: $RUN_URL"
-                    fi
-                else
-                    if [ -n "$FAILED_JOBS" ]; then
-                        echo "❌ Tests \`$FAILED_JOBS\` for $TAG failed: $RUN_URL"
-                    else
-                        echo "❌ Tests for $TAG failed: $RUN_URL"
-                    fi
-                fi
-            elif [ "$COMPLIANCE_RESULT" == "failure" ]; then
-                # We already notify within that job
-                echo ""
-            elif [ "$VALIDATE_RESULT" == "failure" ]; then
-                echo "❌ Release validation failed for $TAG: missing assets: $RUN_URL"
-            elif [ "$AUTO_RELEASE_RESULT" == "failure" ]; then
-                echo "❌ Auto release failed for $TAG: $RUN_URL"
-            elif [ "$AUTO_RELEASE_RESULT" == "success" ] && [ "$AUTO_RELEASE_PUBLISHED" == "true" ]; then
-                echo "✅ Release $TAG was auto-released successfully: $RELEASE_URL"
-            else
-                echo "👀 Release $TAG sitting freshly baked in the oven and waiting to be published: $RELEASE_URL"
-            fi
-        fi
-        "#,
-    };
-
-    let mut all_deps: Vec<&NamedJob> = vec![
-        create_draft_release_job,
-        upload_assets_job,
-        validate_assets_job,
-        compliance_job,
-        auto_release_preview,
-    ];
-    all_deps.extend(test_jobs.iter().copied());
-    all_deps.extend(bundle_jobs.jobs());
-
-    let mut job = dependant_job(&all_deps)
-        .runs_on(runners::LINUX_SMALL)
-        .cond(Expression::new("always()"));
-
-    for step in notify_slack(MessageType::Evaluated {
-        script: notification_script,
-        env: env_entries.collect(),
-    }) {
-        job = job.add_step(step);
-    }
-    named::job(job)
 }
 
 pub(crate) fn notify_on_failure(deps: &[&NamedJob]) -> NamedJob {
@@ -661,79 +587,14 @@ pub(crate) fn notify_on_failure(deps: &[&NamedJob]) -> NamedJob {
         .runs_on(runners::LINUX_SMALL)
         .cond(Expression::new("failure()"));
 
-    for step in notify_slack(MessageType::Static(failure_message)) {
-        job = job.add_step(step);
-    }
+    job = job.add_step(send_slack_message(failure_message));
     named::job(job)
 }
 
-pub(crate) enum MessageType {
-    Static(String),
-    Evaluated {
-        script: String,
-        env: Vec<(String, String)>,
-    },
-}
-
-enum MessageSource {
-    String(String),
-    StepOutput(StepOutput),
-}
-
-impl MessageSource {
-    fn message(self) -> String {
-        match self {
-            MessageSource::String(string) => string,
-            MessageSource::StepOutput(output) => output.to_string(),
-        }
-    }
-}
-
-fn notify_slack(message: MessageType) -> Vec<Step<Run>> {
-    match message {
-        MessageType::Static(message) => vec![send_slack_message(MessageSource::String(message))],
-        MessageType::Evaluated { script, env } => {
-            let (generate_step, generated_message) = generate_slack_message(script, env);
-
-            vec![
-                generate_step,
-                send_slack_message(MessageSource::StepOutput(generated_message)),
-            ]
-        }
-    }
-}
-
-fn generate_slack_message(
-    expression: String,
-    env: Vec<(String, String)>,
-) -> (Step<Run>, StepOutput) {
-    let script = formatdoc! {r#"
-        MESSAGE=$({expression})
-        echo "message=$MESSAGE" >> "$GITHUB_OUTPUT"
-        "#
-    };
-    let mut generate_step = named::bash(&script)
-        .id("generate-webhook-message")
-        .add_env(("GH_TOKEN", Context::github().token()));
-
-    for (name, value) in env {
-        generate_step = generate_step.add_env((name, value));
-    }
-
-    let output = StepOutput::new(&generate_step, "message");
-
-    (generate_step, output)
-}
-
-fn send_slack_message(message_source: MessageSource) -> Step<Run> {
+fn send_slack_message(message: String) -> Step<Run> {
     named::bash(
         r#"curl -X POST -H 'Content-type: application/json' --data "$(jq -n --arg text "$SLACK_MESSAGE" '{"text": $text}')" "$SLACK_WEBHOOK""#
     )
-    .map(|this| match &message_source {
-        MessageSource::String(_) => this,
-        MessageSource::StepOutput(output) => this
-            .if_condition(Expression::new(format!("{message} != ''", message = output.expr()))),
-    })
     .add_env(("SLACK_WEBHOOK", vars::SLACK_WEBHOOK_WORKFLOW_FAILURES))
-    .add_env(("SLACK_MESSAGE", message_source.message()))
+    .add_env(("SLACK_MESSAGE", message))
 }

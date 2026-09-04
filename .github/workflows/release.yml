@@ -8,12 +8,13 @@ on:
   push:
     tags:
     - v*
+  workflow_dispatch: {}
 permissions:
   contents: read
 jobs:
   run_tests_mac:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
-    runs-on: namespace-profile-mac-large
+    if: 'true'
+    runs-on: macos-latest
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -59,8 +60,8 @@ jobs:
         rm -rf ./../.cargo
     timeout-minutes: 60
   run_tests_linux:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
-    runs-on: namespace-profile-16x32-ubuntu-2204
+    if: 'true'
+    runs-on: ubuntu-latest
     env:
       CC: clang
       CXX: clang++
@@ -119,8 +120,8 @@ jobs:
         - 5432:5432
         options: --health-cmd pg_isready --health-interval 500ms --health-timeout 5s --health-retries 10
   run_tests_windows:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
-    runs-on: self-32vcpu-windows-2022
+    if: 'true'
+    runs-on: windows-latest
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -161,8 +162,8 @@ jobs:
       shell: pwsh
     timeout-minutes: 60
   clippy_mac:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
-    runs-on: namespace-profile-mac-large
+    if: 'true'
+    runs-on: macos-latest
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -190,8 +191,8 @@ jobs:
       run: sccache --show-stats || true
     timeout-minutes: 60
   clippy_linux:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
-    runs-on: namespace-profile-16x32-ubuntu-2204
+    if: 'true'
+    runs-on: ubuntu-latest
     env:
       CC: clang
       CXX: clang++
@@ -226,8 +227,8 @@ jobs:
       run: sccache --show-stats || true
     timeout-minutes: 60
   clippy_windows:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
-    runs-on: self-32vcpu-windows-2022
+    if: 'true'
+    runs-on: windows-latest
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -254,8 +255,8 @@ jobs:
       shell: pwsh
     timeout-minutes: 60
   check_scripts:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
-    runs-on: namespace-profile-8x16-ubuntu-2204
+    if: 'true'
+    runs-on: ubuntu-latest
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -291,18 +292,10 @@ jobs:
         version: latest
     timeout-minutes: 60
   create_draft_release:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
-    runs-on: namespace-profile-2x4-ubuntu-2404
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-    - id: generate-token
-      name: steps::authenticate_as_zippy
-      uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859
-      with:
-        app-id: ${{ secrets.ZED_ZIPPY_APP_ID }}
-        private-key: ${{ secrets.ZED_ZIPPY_APP_PRIVATE_KEY }}
-        owner: ${{ github.repository_owner }}
-        repositories: ${{ github.event.repository.name }}
-        permission-contents: write
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
@@ -318,7 +311,7 @@ jobs:
     - name: release::create_draft_release::create_release
       run: script/create-draft-release target/release-notes.md
       env:
-        GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 60
   compliance_check:
     if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
@@ -377,7 +370,7 @@ jobs:
     - run_tests_linux
     - clippy_linux
     - check_scripts
-    runs-on: namespace-profile-8x32-ubuntu-2004-arm-m4
+    runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: 0
       ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
@@ -422,7 +415,7 @@ jobs:
     - run_tests_linux
     - clippy_linux
     - check_scripts
-    runs-on: namespace-profile-32x64-ubuntu-2004
+    runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: 0
       ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
@@ -467,7 +460,7 @@ jobs:
     - run_tests_linux
     - clippy_linux
     - check_scripts
-    runs-on: namespace-profile-8x32-ubuntu-2004-arm-m4
+    runs-on: ubuntu-latest
     steps:
     - name: steps::cache_nix_dependencies_namespace
       uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
@@ -502,7 +495,7 @@ jobs:
     - run_tests_linux
     - clippy_linux
     - check_scripts
-    runs-on: namespace-profile-32x64-ubuntu-2004
+    runs-on: ubuntu-latest
     steps:
     - name: steps::cache_nix_dependencies_namespace
       uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
@@ -537,7 +530,7 @@ jobs:
     - run_tests_mac
     - clippy_mac
     - check_scripts
-    runs-on: namespace-profile-mac-large
+    runs-on: macos-latest
     env:
       CARGO_INCREMENTAL: 0
       ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
@@ -589,7 +582,7 @@ jobs:
     - run_tests_mac
     - clippy_mac
     - check_scripts
-    runs-on: namespace-profile-mac-large
+    runs-on: macos-latest
     env:
       CARGO_INCREMENTAL: 0
       ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
@@ -641,7 +634,7 @@ jobs:
     - run_tests_windows
     - clippy_windows
     - check_scripts
-    runs-on: self-32vcpu-windows-2022
+    runs-on: windows-latest
     env:
       CARGO_INCREMENTAL: 0
       ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
@@ -689,7 +682,7 @@ jobs:
     - run_tests_windows
     - clippy_windows
     - check_scripts
-    runs-on: self-32vcpu-windows-2022
+    runs-on: windows-latest
     env:
       CARGO_INCREMENTAL: 0
       ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
@@ -743,7 +736,7 @@ jobs:
     - bundle_mac_x86_64
     - bundle_windows_aarch64
     - bundle_windows_x86_64
-    runs-on: namespace-profile-4x8-ubuntu-2204
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -778,7 +771,7 @@ jobs:
   validate_release_assets:
     needs:
     - upload_release_assets
-    runs-on: namespace-profile-2x4-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -856,7 +849,7 @@ jobs:
     - validate_release_assets
     - release_compliance_check
     if: startsWith(github.ref, 'refs/tags/v') && endsWith(github.ref, '-pre')
-    runs-on: namespace-profile-2x4-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
     - id: generate-token
       name: steps::authenticate_as_zippy
@@ -912,117 +905,6 @@ jobs:
         GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
     outputs:
       release_published: ${{ steps.auto-release-preview.outputs.release_published }}
-  push_release_update_notification:
-    needs:
-    - create_draft_release
-    - upload_release_assets
-    - validate_release_assets
-    - release_compliance_check
-    - auto_release_preview
-    - run_tests_mac
-    - run_tests_linux
-    - run_tests_windows
-    - clippy_mac
-    - clippy_linux
-    - clippy_windows
-    - check_scripts
-    - bundle_linux_aarch64
-    - bundle_linux_x86_64
-    - build_static_bwrap_linux_aarch64
-    - build_static_bwrap_linux_x86_64
-    - bundle_mac_aarch64
-    - bundle_mac_x86_64
-    - bundle_windows_aarch64
-    - bundle_windows_x86_64
-    if: always()
-    runs-on: namespace-profile-2x4-ubuntu-2404
-    steps:
-    - id: generate-webhook-message
-      name: release::generate_slack_message
-      run: |
-        MESSAGE=$(if [ "$DRAFT_RESULT" == "failure" ]; then
-            echo "❌ Draft release creation failed for $TAG: $RUN_URL"
-        else
-            RELEASE_URL=$(gh release view "$TAG" --json url -q '.url')
-            if [ "$UPLOAD_RESULT" == "failure" ]; then
-                echo "❌ Release asset upload failed for $TAG: $RELEASE_URL"
-            elif [ "$UPLOAD_RESULT" == "cancelled" ] || [ "$UPLOAD_RESULT" == "skipped" ]; then
-                FAILED_JOBS=""
-                if [ "$RESULT_RUN_TESTS_MAC" == "failure" ];then FAILED_JOBS="$FAILED_JOBS run_tests_mac"; fi
-                if [ "$RESULT_RUN_TESTS_LINUX" == "failure" ];then FAILED_JOBS="$FAILED_JOBS run_tests_linux"; fi
-                if [ "$RESULT_RUN_TESTS_WINDOWS" == "failure" ];then FAILED_JOBS="$FAILED_JOBS run_tests_windows"; fi
-                if [ "$RESULT_CLIPPY_MAC" == "failure" ];then FAILED_JOBS="$FAILED_JOBS clippy_mac"; fi
-                if [ "$RESULT_CLIPPY_LINUX" == "failure" ];then FAILED_JOBS="$FAILED_JOBS clippy_linux"; fi
-                if [ "$RESULT_CLIPPY_WINDOWS" == "failure" ];then FAILED_JOBS="$FAILED_JOBS clippy_windows"; fi
-                if [ "$RESULT_CHECK_SCRIPTS" == "failure" ];then FAILED_JOBS="$FAILED_JOBS check_scripts"; fi
-                if [ "$RESULT_BUNDLE_LINUX_AARCH64" == "failure" ];then FAILED_JOBS="$FAILED_JOBS bundle_linux_aarch64"; fi
-                if [ "$RESULT_BUNDLE_LINUX_X86_64" == "failure" ];then FAILED_JOBS="$FAILED_JOBS bundle_linux_x86_64"; fi
-                if [ "$RESULT_BUILD_STATIC_BWRAP_LINUX_AARCH64" == "failure" ];then FAILED_JOBS="$FAILED_JOBS build_static_bwrap_linux_aarch64"; fi
-                if [ "$RESULT_BUILD_STATIC_BWRAP_LINUX_X86_64" == "failure" ];then FAILED_JOBS="$FAILED_JOBS build_static_bwrap_linux_x86_64"; fi
-                if [ "$RESULT_BUNDLE_MAC_AARCH64" == "failure" ];then FAILED_JOBS="$FAILED_JOBS bundle_mac_aarch64"; fi
-                if [ "$RESULT_BUNDLE_MAC_X86_64" == "failure" ];then FAILED_JOBS="$FAILED_JOBS bundle_mac_x86_64"; fi
-                if [ "$RESULT_BUNDLE_WINDOWS_AARCH64" == "failure" ];then FAILED_JOBS="$FAILED_JOBS bundle_windows_aarch64"; fi
-                if [ "$RESULT_BUNDLE_WINDOWS_X86_64" == "failure" ];then FAILED_JOBS="$FAILED_JOBS bundle_windows_x86_64"; fi
-                FAILED_JOBS=$(echo "$FAILED_JOBS" | xargs)
-                if [ "$UPLOAD_RESULT" == "cancelled" ]; then
-                    if [ -n "$FAILED_JOBS" ]; then
-                        echo "❌ Release job for $TAG was cancelled, most likely because tests \`$FAILED_JOBS\` failed: $RUN_URL"
-                    else
-                        echo "❌ Release job for $TAG was cancelled: $RUN_URL"
-                    fi
-                else
-                    if [ -n "$FAILED_JOBS" ]; then
-                        echo "❌ Tests \`$FAILED_JOBS\` for $TAG failed: $RUN_URL"
-                    else
-                        echo "❌ Tests for $TAG failed: $RUN_URL"
-                    fi
-                fi
-            elif [ "$COMPLIANCE_RESULT" == "failure" ]; then
-                # We already notify within that job
-                echo ""
-            elif [ "$VALIDATE_RESULT" == "failure" ]; then
-                echo "❌ Release validation failed for $TAG: missing assets: $RUN_URL"
-            elif [ "$AUTO_RELEASE_RESULT" == "failure" ]; then
-                echo "❌ Auto release failed for $TAG: $RUN_URL"
-            elif [ "$AUTO_RELEASE_RESULT" == "success" ] && [ "$AUTO_RELEASE_PUBLISHED" == "true" ]; then
-                echo "✅ Release $TAG was auto-released successfully: $RELEASE_URL"
-            else
-                echo "👀 Release $TAG sitting freshly baked in the oven and waiting to be published: $RELEASE_URL"
-            fi
-        fi
-        )
-        echo "message=$MESSAGE" >> "$GITHUB_OUTPUT"
-      env:
-        GH_TOKEN: ${{ github.token }}
-        DRAFT_RESULT: ${{ needs.create_draft_release.result }}
-        UPLOAD_RESULT: ${{ needs.upload_release_assets.result }}
-        VALIDATE_RESULT: ${{ needs.validate_release_assets.result }}
-        COMPLIANCE_RESULT: ${{ needs.release_compliance_check.result }}
-        AUTO_RELEASE_RESULT: ${{ needs.auto_release_preview.result }}
-        AUTO_RELEASE_PUBLISHED: ${{ needs.auto_release_preview.outputs.release_published }}
-        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        TAG: ${{ github.ref_name }}
-        RESULT_RUN_TESTS_MAC: ${{ needs.run_tests_mac.result }}
-        RESULT_RUN_TESTS_LINUX: ${{ needs.run_tests_linux.result }}
-        RESULT_RUN_TESTS_WINDOWS: ${{ needs.run_tests_windows.result }}
-        RESULT_CLIPPY_MAC: ${{ needs.clippy_mac.result }}
-        RESULT_CLIPPY_LINUX: ${{ needs.clippy_linux.result }}
-        RESULT_CLIPPY_WINDOWS: ${{ needs.clippy_windows.result }}
-        RESULT_CHECK_SCRIPTS: ${{ needs.check_scripts.result }}
-        RESULT_BUNDLE_LINUX_AARCH64: ${{ needs.bundle_linux_aarch64.result }}
-        RESULT_BUNDLE_LINUX_X86_64: ${{ needs.bundle_linux_x86_64.result }}
-        RESULT_BUILD_STATIC_BWRAP_LINUX_AARCH64: ${{ needs.build_static_bwrap_linux_aarch64.result }}
-        RESULT_BUILD_STATIC_BWRAP_LINUX_X86_64: ${{ needs.build_static_bwrap_linux_x86_64.result }}
-        RESULT_BUNDLE_MAC_AARCH64: ${{ needs.bundle_mac_aarch64.result }}
-        RESULT_BUNDLE_MAC_X86_64: ${{ needs.bundle_mac_x86_64.result }}
-        RESULT_BUNDLE_WINDOWS_AARCH64: ${{ needs.bundle_windows_aarch64.result }}
-        RESULT_BUNDLE_WINDOWS_X86_64: ${{ needs.bundle_windows_x86_64.result }}
-    - name: release::send_slack_message
-      if: steps.generate-webhook-message.outputs.message != ''
-      run: 'curl -X POST -H ''Content-type: application/json'' --data "$(jq -n --arg text "$SLACK_MESSAGE" ''{"text": $text}'')" "$SLACK_WEBHOOK"'
-      env:
-        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_WORKFLOW_FAILURES }}
-        SLACK_MESSAGE: ${{ steps.generate-webhook-message.outputs.message }}
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
   cancel-in-progress: true

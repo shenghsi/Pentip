@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 
+set -euo pipefail
+
 channel="$1"
 
-query=""
 case $channel in
   stable)
+    filter='(.isDraft | not) and (.tagName | endswith("-pre") | not) and (.tagName != "nightly")'
     ;;
   preview)
-    query="&preview=1"
+    filter='(.isDraft | not) and (.tagName | endswith("-pre"))'
     ;;
   nightly)
-    query="&nightly=1"
+    filter='(.tagName == "nightly")'
     ;;
   *)
     echo "this must be run on either of stable|preview|nightly release branches" >&2
@@ -18,4 +20,14 @@ case $channel in
     ;;
 esac
 
-curl -s "https://cloud.zed.dev/releases/$channel/latest/asset?asset=zed&os=macos&arch=aarch64" | jq -r .version
+tag=$(gh release list --limit 100 --json tagName,isDraft,publishedAt \
+    --jq "[.[] | select($filter)] | sort_by(.publishedAt) | reverse | .[0].tagName // empty")
+
+if [ -z "$tag" ]; then
+    # No release has been published yet for this channel (e.g. this is the
+    # very first release for this repo) - fall back to the version already
+    # checked into the crate.
+    script/get-crate-version zed
+else
+    echo "${tag#v}"
+fi

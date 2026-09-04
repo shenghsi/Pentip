@@ -2,8 +2,8 @@ use gh_workflow::*;
 
 use crate::tasks::workflows::{
     runners,
-    steps::{self, CheckoutStep, CommonJobConditions, CommonPermissionSets, named},
-    vars::{StepOutput, WorkflowInput},
+    steps::{self, CheckoutStep, CommonPermissionSets, named},
+    vars::{self, StepOutput, WorkflowInput},
 };
 
 pub fn bump_patch_version() -> Workflow {
@@ -23,7 +23,7 @@ pub fn bump_patch_version() -> Workflow {
 }
 
 fn run_bump_patch_version(branch: &WorkflowInput) -> steps::NamedJob {
-    fn checkout_branch(branch: &WorkflowInput, token: &StepOutput) -> CheckoutStep {
+    fn checkout_branch(branch: &WorkflowInput, token: &str) -> CheckoutStep {
         steps::checkout_repo()
             .with_token(token)
             .with_ref(branch.to_string())
@@ -65,13 +65,11 @@ fn run_bump_patch_version(branch: &WorkflowInput) -> steps::NamedJob {
         .id("bump-version")
     }
 
-    let (authenticate, token) = steps::authenticate_as_zippy()
-        .for_repository(steps::RepositoryTarget::current())
-        .with_permissions([
-            (steps::TokenPermissions::Contents, Level::Write),
-            (steps::TokenPermissions::Workflows, Level::Write),
-        ])
-        .into();
+    // Zed's release tooling authenticates as a custom GitHub App ("Zippy") that
+    // only exists in the zed-industries org. Forks don't have that app, so this
+    // uses the repo's own GITHUB_TOKEN instead - it's sufficient here since this
+    // job never touches .github/workflows (the one thing GITHUB_TOKEN can't push).
+    let token = vars::GITHUB_TOKEN;
     let channel_step = read_channel();
     let tag_suffix = StepOutput::new(&channel_step, "tag_suffix");
     let bump_version_step = bump_version();
@@ -79,18 +77,18 @@ fn run_bump_patch_version(branch: &WorkflowInput) -> steps::NamedJob {
     let commit_step: Step<Use> = steps::BotCommitStep::new(
         format!("Bump to {version} for @${{{{ github.actor }}}}"),
         branch,
-        &token,
+        token,
     )
     .into();
     let commit_sha = StepOutput::new_unchecked(&commit_step, "commit");
 
     named::job(
         Job::default()
-            .with_repository_owner_guard()
             .permissions(Permissions::default().contents(Level::Write))
-            .runs_on(runners::LINUX_DEFAULT)
-            .add_step(authenticate)
-            .add_step(checkout_branch(branch, &token))
+            // Zed's default Linux runner is a paid Namespace.so cloud profile,
+            // unavailable on this fork; use a standard GitHub-hosted runner.
+            .runs_on(runners::GITHUB_LINUX)
+            .add_step(checkout_branch(branch, token))
             .add_step(channel_step)
             .add_step(steps::install_cargo_edit())
             .add_step(bump_version_step)
@@ -98,7 +96,7 @@ fn run_bump_patch_version(branch: &WorkflowInput) -> steps::NamedJob {
             .add_step(steps::create_ref(
                 steps::GitRef::tag(format!("v{version}{tag_suffix}")),
                 &commit_sha,
-                &token,
+                token,
             )),
     )
 }

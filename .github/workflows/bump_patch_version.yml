@@ -12,27 +12,16 @@ permissions:
   contents: read
 jobs:
   run_bump_patch_version:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
-    runs-on: namespace-profile-16x32-ubuntu-2204
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-    - id: generate-token
-      name: steps::authenticate_as_zippy
-      uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859
-      with:
-        app-id: ${{ secrets.ZED_ZIPPY_APP_ID }}
-        private-key: ${{ secrets.ZED_ZIPPY_APP_PRIVATE_KEY }}
-        owner: ${{ github.repository_owner }}
-        repositories: ${{ github.event.repository.name }}
-        permission-contents: write
-        permission-workflows: write
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
         ref: ${{ inputs.branch }}
-        token: ${{ steps.generate-token.outputs.token }}
+        token: ${{ secrets.GITHUB_TOKEN }}
     - id: channel
       name: bump_patch_version::run_bump_patch_version::read_channel
       run: |
@@ -74,7 +63,7 @@ jobs:
         message: Bump to ${{ steps.bump-version.outputs.version }} for @${{ github.actor }}
         ref: refs/heads/${{ inputs.branch }}
         files: '**'
-        token: ${{ steps.generate-token.outputs.token }}
+        token: ${{ secrets.GITHUB_TOKEN }}
     - name: steps::create_tag
       uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
       with:
@@ -85,7 +74,7 @@ jobs:
               ref: 'refs/tags/v${{ steps.bump-version.outputs.version }}${{ steps.channel.outputs.tag_suffix }}',
               sha: '${{ steps.commit.outputs.commit }}'
           })
-        github-token: ${{ steps.generate-token.outputs.token }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.branch }}
   cancel-in-progress: true
