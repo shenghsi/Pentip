@@ -63,6 +63,8 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: steps::free_disk_space_linux
+      run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup "${AGENT_TOOLSDIRECTORY:-}" || true
     - name: steps::setup_cargo_config
       run: |
         mkdir -p ./../.cargo
@@ -125,6 +127,10 @@ jobs:
         node-version: '24'
         check-latest: true
         package-manager-cache: false
+    - name: steps::cargo_install_nextest
+      uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9
+      with:
+        tool: nextest
     - name: steps::clear_target_dir_if_large
       run: ./script/clear-target-dir-if-larger-than.ps1 350 200
       shell: pwsh

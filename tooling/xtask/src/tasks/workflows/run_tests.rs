@@ -627,6 +627,10 @@ fn run_platform_tests_impl(
                 this.add_step(steps::harden_runner())
             })
             .add_step(steps::checkout_repo())
+            .when(
+                guard == OwnerGuard::Unrestricted && platform == Platform::Linux,
+                |this| this.add_step(steps::free_disk_space_linux()),
+            )
             .add_step(steps::setup_cargo_config(platform))
             .when(
                 guard == OwnerGuard::Restricted && platform == Platform::Mac,
@@ -641,10 +645,10 @@ fn run_platform_tests_impl(
                 job.add_step(steps::setup_linux())
             })
             .add_step(steps::setup_node())
-            .when(
-                platform == Platform::Linux || platform == Platform::Mac,
-                |job| job.add_step(steps::cargo_install_nextest()),
-            )
+            // Zed's own Windows runner is a custom self-hosted image with
+            // nextest preinstalled; standard windows-latest isn't, so install
+            // it unconditionally rather than only for Linux/Mac.
+            .add_step(steps::cargo_install_nextest())
             .add_step(steps::clear_target_dir_if_large(platform))
             .when(
                 platform == Platform::Linux || platform == Platform::Mac,
