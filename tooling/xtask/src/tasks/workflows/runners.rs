@@ -19,6 +19,11 @@ pub const WINDOWS_DEFAULT: Runner = Runner("self-32vcpu-windows-2022");
 // doesn't have. These are GitHub's standard hosted runners, used instead for
 // release jobs on forks so they actually get scheduled.
 pub const GITHUB_LINUX: Runner = Runner("ubuntu-latest");
+// GITHUB_MAC is already arm64 natively (macos-latest = Apple Silicon), and
+// cross-compiling x86_64 from it works fine via macOS's toolchain - no
+// separate x86_64 Mac runner needed. Linux aarch64 has no such easy cross
+// story, so it gets a real native ARM64 runner instead.
+pub const GITHUB_LINUX_ARM: Runner = Runner("ubuntu-24.04-arm");
 pub const GITHUB_MAC: Runner = Runner("macos-latest");
 pub const GITHUB_WINDOWS: Runner = Runner("windows-latest");
 

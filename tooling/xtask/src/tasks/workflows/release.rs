@@ -71,7 +71,7 @@ pub(crate) fn release() -> Workflow {
                 &[&linux_tests, &linux_clippy, &check_scripts],
                 OwnerGuard::Unrestricted,
             ),
-            runners::GITHUB_LINUX,
+            runners::GITHUB_LINUX_ARM,
         ),
         linux_x86_64: on_standard_runner(
             bundle_linux(
@@ -88,7 +88,7 @@ pub(crate) fn release() -> Workflow {
                 &[&linux_tests, &linux_clippy, &check_scripts],
                 OwnerGuard::Unrestricted,
             ),
-            runners::GITHUB_LINUX,
+            runners::GITHUB_LINUX_ARM,
         ),
         bwrap_linux_x86_64: on_standard_runner(
             build_static_bwrap(
