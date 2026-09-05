@@ -54,7 +54,11 @@ fn bundle_job(deps: &[&NamedJob]) -> Job {
                     r#"(github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
                     (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))"#,
                 })))
-        .timeout_minutes(60u32)
+        // Namespace's Linux bundlers and Zed's other paid runners always have
+        // a warm cache; a cold build on this fork's standard runners (see
+        // OwnerGuard's doc comment in steps.rs) can take longer than 60
+        // minutes, so this is deliberately generous.
+        .timeout_minutes(120u32)
 }
 
 pub(crate) fn bundle_mac(
