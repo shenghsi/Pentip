@@ -143,7 +143,7 @@ jobs:
         name: zed-remote-server-linux-aarch64.gz
         path: target/zed-remote-server-linux-aarch64.gz
         if-no-files-found: error
-    timeout-minutes: 120
+    timeout-minutes: 180
   bundle_linux_x86_64:
     needs:
     - run_tests_linux
@@ -192,7 +192,7 @@ jobs:
         name: zed-remote-server-linux-x86_64.gz
         path: target/zed-remote-server-linux-x86_64.gz
         if-no-files-found: error
-    timeout-minutes: 120
+    timeout-minutes: 180
   build_static_bwrap_linux_aarch64:
     needs:
     - run_tests_linux
@@ -316,7 +316,7 @@ jobs:
         name: zed-remote-server-macos-aarch64.gz
         path: target/zed-remote-server-macos-aarch64.gz
         if-no-files-found: error
-    timeout-minutes: 120
+    timeout-minutes: 180
   bundle_mac_x86_64:
     needs:
     - run_tests_linux
@@ -372,7 +372,7 @@ jobs:
         name: zed-remote-server-macos-x86_64.gz
         path: target/zed-remote-server-macos-x86_64.gz
         if-no-files-found: error
-    timeout-minutes: 120
+    timeout-minutes: 180
   bundle_windows_aarch64:
     needs:
     - run_tests_linux
@@ -426,7 +426,7 @@ jobs:
         name: zed-remote-server-windows-aarch64.zip
         path: target/zed-remote-server-windows-aarch64.zip
         if-no-files-found: error
-    timeout-minutes: 120
+    timeout-minutes: 180
   bundle_windows_x86_64:
     needs:
     - run_tests_linux
@@ -480,7 +480,7 @@ jobs:
         name: zed-remote-server-windows-x86_64.zip
         path: target/zed-remote-server-windows-x86_64.zip
         if-no-files-found: error
-    timeout-minutes: 120
+    timeout-minutes: 180
   build_nix_linux_x86_64:
     needs:
     - run_tests_linux
