@@ -46,3 +46,10 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 [[profile.default.overrides]]
 filter =  'package(editor) and test(test_random_blocks)'
 slow-timeout = { period = "300s", terminate-after = 1 }
+
+# Standard GitHub-hosted runners (this fork's CI) are slower and uncached
+# compared to Zed's own tuned runners; these were observed timing out at
+# 60s there specifically.
+[[profile.default.overrides]]
+filter = 'test(test_random_worktree_changes) or test(random_channel_buffer_tests) or test(test_peers_following_each_other)'
+slow-timeout = { period = "300s", terminate-after = 1 }
