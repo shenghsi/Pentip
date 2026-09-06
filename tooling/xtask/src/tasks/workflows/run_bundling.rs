@@ -57,9 +57,10 @@ fn bundle_job(deps: &[&NamedJob]) -> Job {
         // Namespace's Linux bundlers and Zed's other paid runners always have
         // a warm cache; a cold build on this fork's standard runners (see
         // OwnerGuard's doc comment in steps.rs) can take a lot longer. 120
-        // minutes wasn't enough - bundle_windows_* and bundle_mac_* both hit
-        // it exactly - so this is more generous still.
-        .timeout_minutes(180u32)
+        // wasn't enough for bundle_windows_*/bundle_mac_*; 180 wasn't enough
+        // for bundle_mac_* either (hit it exactly again) - bundle_mac_* in
+        // particular seems to be the slowest build of the bunch.
+        .timeout_minutes(240u32)
 }
 
 pub(crate) fn bundle_mac(
