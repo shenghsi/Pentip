@@ -51,5 +51,5 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 # compared to Zed's own tuned runners; these were observed timing out at
 # 60s there specifically.
 [[profile.default.overrides]]
-filter = 'test(test_random_worktree_changes) or test(random_channel_buffer_tests) or test(test_peers_following_each_other)'
+filter = 'test(test_random_worktree_changes) or test(random_channel_buffer_tests) or test(test_peers_following_each_other) or test(test_random_multibuffer)'
 slow-timeout = { period = "300s", terminate-after = 1 }
