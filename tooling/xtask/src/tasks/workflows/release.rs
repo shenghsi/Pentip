@@ -395,7 +395,7 @@ fn validate_release_assets(deps: &[&NamedJob]) -> NamedJob {
         EXPECTED_ASSETS='{expected_assets_json}'
         TAG="$GITHUB_REF_NAME"
 
-        ACTUAL_ASSETS=$(gh release view "$TAG" --json assets -q '[.assets[].name]')
+        ACTUAL_ASSETS=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets -q '[.assets[].name]')
 
         MISSING_ASSETS=$(echo "$EXPECTED_ASSETS" | jq -r --argjson actual "$ACTUAL_ASSETS" '. - $actual | .[]')
 
@@ -535,8 +535,10 @@ fn upload_release_assets(deps: &[&NamedJob], bundle: &ReleaseBundleJobs) -> Name
             .add_step(steps::script("ls -lR ./artifacts"))
             .add_step(prep_release_artifacts())
             .add_step(
-                steps::script("gh release upload \"$GITHUB_REF_NAME\" release-artifacts/*")
-                    .add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN)),
+                steps::script(
+                    "gh release upload \"$GITHUB_REF_NAME\" release-artifacts/* -R \"$GITHUB_REPOSITORY\"",
+                )
+                .add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN)),
             ),
     )
 }

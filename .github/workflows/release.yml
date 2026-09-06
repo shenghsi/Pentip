@@ -707,8 +707,8 @@ jobs:
         mv ./artifacts/zed-remote-server-linux-x86_64.gz/zed-remote-server-linux-x86_64.gz release-artifacts/zed-remote-server-linux-x86_64.gz
         mv ./artifacts/zed-remote-server-windows-aarch64.zip/zed-remote-server-windows-aarch64.zip release-artifacts/zed-remote-server-windows-aarch64.zip
         mv ./artifacts/zed-remote-server-windows-x86_64.zip/zed-remote-server-windows-x86_64.zip release-artifacts/zed-remote-server-windows-x86_64.zip
-    - name: gh release upload "$GITHUB_REF_NAME" release-artifacts/*
-      run: gh release upload "$GITHUB_REF_NAME" release-artifacts/*
+    - name: gh release upload "$GITHUB_REF_NAME" release-artifacts/* -R "$GITHUB_REPOSITORY"
+      run: gh release upload "$GITHUB_REF_NAME" release-artifacts/* -R "$GITHUB_REPOSITORY"
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   validate_release_assets:
@@ -723,7 +723,7 @@ jobs:
         EXPECTED_ASSETS='["Zed-aarch64.dmg", "Zed-x86_64.dmg", "zed-linux-aarch64.tar.gz", "zed-linux-x86_64.tar.gz", "bwrap-linux-aarch64.gz", "bwrap-linux-x86_64.gz", "Zed-x86_64.exe", "Zed-aarch64.exe", "zed-remote-server-macos-aarch64.gz", "zed-remote-server-macos-x86_64.gz", "zed-remote-server-linux-aarch64.gz", "zed-remote-server-linux-x86_64.gz", "zed-remote-server-windows-aarch64.zip", "zed-remote-server-windows-x86_64.zip"]'
         TAG="$GITHUB_REF_NAME"
 
-        ACTUAL_ASSETS=$(gh release view "$TAG" --json assets -q '[.assets[].name]')
+        ACTUAL_ASSETS=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets -q '[.assets[].name]')
 
         MISSING_ASSETS=$(echo "$EXPECTED_ASSETS" | jq -r --argjson actual "$ACTUAL_ASSETS" '. - $actual | .[]')
 
