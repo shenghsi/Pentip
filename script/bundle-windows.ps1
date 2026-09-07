@@ -49,7 +49,14 @@ $vsInstallPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio
 if (-not $vsInstallPath) {
     throw "Could not locate a Visual Studio installation with the C++ build tools via vswhere"
 }
-& (Join-Path $vsInstallPath "Common7\Tools\Launch-VsDevShell.ps1") -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+# Launch-VsDevShell.ps1's -HostArch only accepts x86/amd64, so it can't be
+# passed on a native ARM64 host (e.g. windows-11-arm) - omit it there and let
+# the script auto-detect instead.
+$vsDevShellArgs = @{ Arch = (Get-VSArch -Arch $Architecture) }
+if ($OSArchitecture -ne "aarch64") {
+    $vsDevShellArgs.HostArch = (Get-VSArch -Arch $OSArchitecture)
+}
+& (Join-Path $vsInstallPath "Common7\Tools\Launch-VsDevShell.ps1") @vsDevShellArgs
 Pop-Location
 
 $target = "$Architecture-pc-windows-msvc"
