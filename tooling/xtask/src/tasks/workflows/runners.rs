@@ -1,0 +1,87 @@
+pub const LINUX_SMALL: Runner = Runner("namespace-profile-2x4-ubuntu-2404");
+pub const LINUX_DEFAULT: Runner = LINUX_XL;
+pub const LINUX_XL: Runner = Runner("namespace-profile-16x32-ubuntu-2204");
+pub const LINUX_LARGE: Runner = Runner("namespace-profile-8x16-ubuntu-2204");
+pub const LINUX_MEDIUM: Runner = Runner("namespace-profile-4x8-ubuntu-2204");
+
+// Using Ubuntu 20.04 for minimal glibc version
+pub const LINUX_X86_BUNDLER: Runner = Runner("namespace-profile-32x64-ubuntu-2004");
+pub const LINUX_ARM_BUNDLER: Runner = Runner("namespace-profile-8x32-ubuntu-2004-arm-m4");
+
+// Larger Ubuntu runner with glibc 2.39 for extension bundling
+pub const LINUX_LARGE_RAM: Runner = Runner("namespace-profile-8x32-ubuntu-2404");
+
+pub const MAC_DEFAULT: Runner = Runner("namespace-profile-mac-large");
+pub const WINDOWS_DEFAULT: Runner = Runner("self-32vcpu-windows-2022");
+
+// Every runner above is either a paid Namespace.so cloud profile or a
+// self-hosted box - both zed-industries-only infrastructure that a fork
+// doesn't have. These are GitHub's standard hosted runners, used instead for
+// release jobs on forks so they actually get scheduled.
+pub const GITHUB_LINUX: Runner = Runner("ubuntu-latest");
+// GITHUB_MAC is already arm64 natively (macos-latest = Apple Silicon), and
+// cross-compiling x86_64 from it works fine via macOS's toolchain - no
+// separate x86_64 Mac runner needed. Linux aarch64 has no such easy cross
+// story, so it gets a real native ARM64 runner instead.
+pub const GITHUB_LINUX_ARM: Runner = Runner("ubuntu-24.04-arm");
+pub const GITHUB_MAC: Runner = Runner("macos-latest");
+pub const GITHUB_WINDOWS: Runner = Runner("windows-latest");
+// Same reasoning as GITHUB_LINUX_ARM: MSVC can cross-compile aarch64 from an
+// x86_64 host, but this fork's sibling "flint" fork (same codebase, already
+// running this pipeline successfully) builds it natively instead - use a
+// real ARM64 Windows runner for the bundle job specifically.
+pub const GITHUB_WINDOWS_ARM: Runner = Runner("windows-11-arm");
+
+pub struct Runner(&'static str);
+
+impl Into<gh_workflow::RunsOn> for Runner {
+    fn into(self) -> gh_workflow::RunsOn {
+        self.0.into()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Arch {
+    X86_64,
+    AARCH64,
+}
+
+impl std::fmt::Display for Arch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Arch::X86_64 => write!(f, "x86_64"),
+            Arch::AARCH64 => write!(f, "aarch64"),
+        }
+    }
+}
+
+impl Arch {
+    pub fn linux_bundler(&self) -> Runner {
+        match self {
+            Arch::X86_64 => LINUX_X86_BUNDLER,
+            Arch::AARCH64 => LINUX_ARM_BUNDLER,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Platform {
+    Windows,
+    Linux,
+    Mac,
+}
+
+impl std::fmt::Display for Platform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Platform::Windows => write!(f, "windows"),
+            Platform::Linux => write!(f, "linux"),
+            Platform::Mac => write!(f, "mac"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReleaseChannel {
+    Nightly,
+}

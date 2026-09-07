@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+channel="$1"
+
+case $channel in
+  stable)
+    filter='(.isDraft | not) and (.tagName | endswith("-pre") | not) and (.tagName != "nightly")'
+    ;;
+  preview)
+    filter='(.isDraft | not) and (.tagName | endswith("-pre"))'
+    ;;
+  nightly)
+    filter='(.tagName == "nightly")'
+    ;;
+  *)
+    echo "this must be run on either of stable|preview|nightly release branches" >&2
+    exit 1
+    ;;
+esac
+
+tag=$(gh release list --limit 100 --json tagName,isDraft,publishedAt \
+    --jq "[.[] | select($filter)] | sort_by(.publishedAt) | reverse | .[0].tagName // empty")
+
+if [ -z "$tag" ]; then
+    # No release has been published yet for this channel (e.g. this is the
+    # very first release for this repo) - fall back to the version already
+    # checked into the crate.
+    script/get-crate-version zed
+else
+    echo "${tag#v}"
+fi
