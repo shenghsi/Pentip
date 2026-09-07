@@ -229,7 +229,12 @@ pub(crate) fn bundle_windows(
             .when_some(release_channel, |job, release_channel| {
                 job.add_step(set_release_channel(platform, release_channel))
             })
-            .add_step(steps::setup_sentry())
+            // matbour/setup-sentry-cli has no win32/arm64 build; bundle-windows.ps1
+            // already checks for a missing sentry-cli and skips symbol upload, so
+            // this is safe to skip rather than fail the whole job.
+            .when(arch != Arch::AARCH64, |job| {
+                job.add_step(steps::setup_sentry())
+            })
             .add_step(steps::clear_target_dir_if_large(platform))
             .add_step(bundle_windows(arch))
             .add_step(upload_artifact(&format!("target/{artifact_name}")))

@@ -403,10 +403,6 @@ jobs:
         "nightly" | Set-Content -Path "crates/zed/RELEASE_CHANNEL"
       shell: pwsh
       working-directory: ${{ env.ZED_WORKSPACE }}
-    - name: steps::setup_sentry
-      uses: matbour/setup-sentry-cli@3e938c54b3018bdd019973689ef984e033b0454b
-      with:
-        token: ${{ secrets.SENTRY_AUTH_TOKEN }}
     - name: steps::clear_target_dir_if_large
       run: ./script/clear-target-dir-if-larger-than.ps1 350 200
       shell: pwsh
