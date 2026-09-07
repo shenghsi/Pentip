@@ -253,6 +253,24 @@ pub fn free_disk_space_linux() -> Step<Run> {
     )
 }
 
+/// Same reasoning as free_disk_space_linux() - removes non-active Xcode
+/// installations and stale x86_64 rustup toolchains that ship preinstalled
+/// on GitHub's standard macOS runners. Pattern from this fork's sibling
+/// "flint" fork.
+pub fn free_disk_space_mac() -> Step<Run> {
+    named::bash(indoc::indoc! {r#"
+        df -h /
+        active_xcode="$(xcode-select -p | sed 's#/Contents/Developer$##')"
+        for xcode_app in /Applications/Xcode_*.app; do
+            if [ "$xcode_app" != "$active_xcode" ]; then
+                sudo rm -rf "$xcode_app" 2>/dev/null || true
+            fi
+        done
+        sudo rm -rf /Users/runner/.rustup/toolchains/1.*-x86_64* 2>/dev/null || true
+        df -h /
+    "#})
+}
+
 pub fn clear_target_dir_if_large(platform: Platform) -> Step<Run> {
     match platform {
         Platform::Windows => named::pwsh("./script/clear-target-dir-if-larger-than.ps1 350 200"),

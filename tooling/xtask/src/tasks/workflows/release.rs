@@ -122,7 +122,7 @@ pub(crate) fn release() -> Workflow {
                 None,
                 &[&windows_tests, &windows_clippy, &check_scripts],
             ),
-            runners::GITHUB_WINDOWS,
+            runners::GITHUB_WINDOWS_ARM,
         ),
         windows_x86_64: on_standard_runner(
             bundle_windows(
@@ -151,6 +151,7 @@ pub(crate) fn release() -> Workflow {
         let (job, output) = auto_release_preview(&[&validate_release_assets, &release_compliance]);
         (on_standard_runner(job, runners::GITHUB_LINUX), output)
     };
+    let auto_release_stable = auto_release_stable(&[&validate_release_assets]);
 
     named::workflow()
         .on(Event::default()
@@ -164,6 +165,10 @@ pub(crate) fn release() -> Workflow {
         .with_minimal_permissions()
         .add_env(("CARGO_TERM_COLOR", "always"))
         .add_env(("RUST_BACKTRACE", "1"))
+        // Avoids flaky libgit2 fetches for git dependencies (this workspace
+        // has several) on standard runners - learned from this fork's sibling
+        // "flint" fork, which already runs this pipeline successfully.
+        .add_env(("CARGO_NET_GIT_FETCH_WITH_CLI", "true"))
         .add_job(macos_tests.name, macos_tests.job)
         .add_job(linux_tests.name, linux_tests.job)
         .add_job(windows_tests.name, windows_tests.job)
@@ -186,6 +191,7 @@ pub(crate) fn release() -> Workflow {
         .add_job(validate_release_assets.name, validate_release_assets.job)
         .add_job(release_compliance.name, release_compliance.job)
         .add_job(auto_release_preview.name, auto_release_preview.job)
+        .add_job(auto_release_stable.name, auto_release_stable.job)
 }
 
 pub(crate) struct ReleaseBundleJobs {
@@ -418,6 +424,28 @@ fn validate_release_assets(deps: &[&NamedJob]) -> NamedJob {
             .add_step(
                 named::bash(&validation_script).add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN)),
             ),
+    )
+}
+
+/// Un-drafts stable releases automatically once their assets are validated.
+/// Zed's own upstream leaves this to a human (via auto_release_preview
+/// existing only for the -pre channel); this fork's whole point is that
+/// stable releases here are simple version bumps, not something that
+/// benefits from a manual publish gate. Preview tags are excluded so they
+/// stay on auto_release_preview's own version-matching logic.
+fn auto_release_stable(deps: &[&NamedJob]) -> NamedJob {
+    let script = indoc::indoc! {r#"
+        tag="$GITHUB_REF_NAME"
+        gh release edit "$tag" --draft=false -R "$GITHUB_REPOSITORY"
+        echo "Stable release $tag published"
+    "#};
+
+    named::job(
+        dependant_job(deps)
+            .runs_on(runners::GITHUB_LINUX)
+            .cond(Expression::new("!endsWith(github.ref, '-pre')"))
+            .permissions(Permissions::default().contents(Level::Write))
+            .add_step(named::bash(script).add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN))),
     )
 }
 

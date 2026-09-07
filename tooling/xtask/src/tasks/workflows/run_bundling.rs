@@ -86,6 +86,9 @@ pub(crate) fn bundle_mac(
         job: bundle_job(deps)
             .runs_on(runners::MAC_DEFAULT)
             .envs(bundle_envs(platform))
+            .when(guard == OwnerGuard::Unrestricted, |job| {
+                job.add_step(steps::free_disk_space_mac())
+            })
             .add_step(steps::checkout_repo())
             .when(guard == OwnerGuard::Restricted, |job| {
                 job.add_step(steps::cache_rust_dependencies_namespace())
