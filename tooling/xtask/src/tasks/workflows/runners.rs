@@ -26,6 +26,11 @@ pub const GITHUB_LINUX: Runner = Runner("ubuntu-latest");
 pub const GITHUB_LINUX_ARM: Runner = Runner("ubuntu-24.04-arm");
 pub const GITHUB_MAC: Runner = Runner("macos-latest");
 pub const GITHUB_WINDOWS: Runner = Runner("windows-latest");
+// Same reasoning as GITHUB_LINUX_ARM: MSVC can cross-compile aarch64 from an
+// x86_64 host, but this fork's sibling "flint" fork (same codebase, already
+// running this pipeline successfully) builds it natively instead - use a
+// real ARM64 Windows runner for the bundle job specifically.
+pub const GITHUB_WINDOWS_ARM: Runner = Runner("windows-11-arm");
 
 pub struct Runner(&'static str);
 

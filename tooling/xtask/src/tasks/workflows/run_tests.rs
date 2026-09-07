@@ -561,6 +561,10 @@ pub(crate) fn clippy(platform: Platform, arch: Option<Arch>, harden: bool, guard
             this.add_step(steps::harden_runner())
         })
         .add_step(steps::checkout_repo())
+        .when(
+            guard == OwnerGuard::Unrestricted && platform == Platform::Mac,
+            |this| this.add_step(steps::free_disk_space_mac()),
+        )
         .add_step(steps::setup_cargo_config(platform))
         .when(
             guard == OwnerGuard::Restricted && (platform == Platform::Linux || platform == Platform::Mac),
@@ -630,6 +634,10 @@ fn run_platform_tests_impl(
             .when(
                 guard == OwnerGuard::Unrestricted && platform == Platform::Linux,
                 |this| this.add_step(steps::free_disk_space_linux()),
+            )
+            .when(
+                guard == OwnerGuard::Unrestricted && platform == Platform::Mac,
+                |this| this.add_step(steps::free_disk_space_mac()),
             )
             .add_step(steps::setup_cargo_config(platform))
             .when(

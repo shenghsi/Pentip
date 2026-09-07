@@ -4,6 +4,7 @@ name: release
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
 on:
   push:
     tags:
@@ -19,6 +20,17 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: steps::free_disk_space_mac
+      run: |
+        df -h /
+        active_xcode="$(xcode-select -p | sed 's#/Contents/Developer$##')"
+        for xcode_app in /Applications/Xcode_*.app; do
+            if [ "$xcode_app" != "$active_xcode" ]; then
+                sudo rm -rf "$xcode_app" 2>/dev/null || true
+            fi
+        done
+        sudo rm -rf /Users/runner/.rustup/toolchains/1.*-x86_64* 2>/dev/null || true
+        df -h /
     - name: steps::setup_cargo_config
       run: |
         mkdir -p ./../.cargo
@@ -161,6 +173,17 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: steps::free_disk_space_mac
+      run: |
+        df -h /
+        active_xcode="$(xcode-select -p | sed 's#/Contents/Developer$##')"
+        for xcode_app in /Applications/Xcode_*.app; do
+            if [ "$xcode_app" != "$active_xcode" ]; then
+                sudo rm -rf "$xcode_app" 2>/dev/null || true
+            fi
+        done
+        sudo rm -rf /Users/runner/.rustup/toolchains/1.*-x86_64* 2>/dev/null || true
+        df -h /
     - name: steps::setup_cargo_config
       run: |
         mkdir -p ./../.cargo
@@ -494,6 +517,17 @@ jobs:
       APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
       APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
     steps:
+    - name: steps::free_disk_space_mac
+      run: |
+        df -h /
+        active_xcode="$(xcode-select -p | sed 's#/Contents/Developer$##')"
+        for xcode_app in /Applications/Xcode_*.app; do
+            if [ "$xcode_app" != "$active_xcode" ]; then
+                sudo rm -rf "$xcode_app" 2>/dev/null || true
+            fi
+        done
+        sudo rm -rf /Users/runner/.rustup/toolchains/1.*-x86_64* 2>/dev/null || true
+        df -h /
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
@@ -541,6 +575,17 @@ jobs:
       APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
       APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
     steps:
+    - name: steps::free_disk_space_mac
+      run: |
+        df -h /
+        active_xcode="$(xcode-select -p | sed 's#/Contents/Developer$##')"
+        for xcode_app in /Applications/Xcode_*.app; do
+            if [ "$xcode_app" != "$active_xcode" ]; then
+                sudo rm -rf "$xcode_app" 2>/dev/null || true
+            fi
+        done
+        sudo rm -rf /Users/runner/.rustup/toolchains/1.*-x86_64* 2>/dev/null || true
+        df -h /
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
@@ -577,7 +622,7 @@ jobs:
     - run_tests_windows
     - clippy_windows
     - check_scripts
-    runs-on: windows-latest
+    runs-on: windows-11-arm
     env:
       CARGO_INCREMENTAL: 0
       ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
@@ -843,6 +888,21 @@ jobs:
         GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
     outputs:
       release_published: ${{ steps.auto-release-preview.outputs.release_published }}
+  auto_release_stable:
+    needs:
+    - validate_release_assets
+    if: '!endsWith(github.ref, ''-pre'')'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: release::auto_release_stable
+      run: |
+        tag="$GITHUB_REF_NAME"
+        gh release edit "$tag" --draft=false -R "$GITHUB_REPOSITORY"
+        echo "Stable release $tag published"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
   cancel-in-progress: true
