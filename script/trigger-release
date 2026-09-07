@@ -8,8 +8,15 @@ if [ "$1" == "nightly" ]; then
   exit
 fi
 
-version=$(./script/get-released-version "$1" | sed 's/\.[^\.]*$/.x/')
-echo "Bumping $1 (v$version)"
+if [ "$1" == "stable" ]; then
+  # main is this fork's release branch - no separate vX.Y.x branch to keep in sync.
+  branch="main"
+else
+  version=$(./script/get-released-version "$1" | sed 's/\.[^\.]*$/.x/')
+  branch="v$version"
+fi
+echo "Bumping $1 ($branch)"
 
-gh workflow run "bump_patch_version.yml" -f branch="v$version"
-echo "Follow along at: https://github.com/zed-industries/zed/actions"
+gh workflow run "bump_patch_version.yml" -f branch="$branch"
+repo_url=$(gh repo view --json url -q .url)
+echo "Follow along at: $repo_url/actions"
