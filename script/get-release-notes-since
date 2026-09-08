@@ -6,12 +6,19 @@ const { GITHUB_ACCESS_TOKEN } = process.env;
 main();
 
 async function main() {
+  const repoNameWithOwner = execFileSync(
+    "gh",
+    ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+    { encoding: "utf8" },
+  ).trim();
+  const [owner, repo] = repoNameWithOwner.split("/");
+
   const startDate = new Date(process.argv[2]);
   const today = new Date();
 
   console.log(`Release notes from ${startDate} to ${today}\n`);
 
-  const releases = await getReleases(startDate, today);
+  const releases = await getReleases(owner, repo, startDate, today);
   const previewReleases = releases.filter((release) =>
     release.tagName.includes("-pre"),
   );
@@ -44,7 +51,7 @@ async function main() {
   }
 }
 
-async function getReleases(startDate, endDate) {
+async function getReleases(owner, repo, startDate, endDate) {
   const query = `
     query ($owner: String!, $repo: String!, $cursor: String) {
       repository(owner: $owner, name: $repo) {
@@ -82,7 +89,7 @@ async function getReleases(startDate, endDate) {
       },
       body: JSON.stringify({
         query,
-        variables: { owner: "zed-industries", repo: "zed", cursor },
+        variables: { owner, repo, cursor },
       }),
     });
 

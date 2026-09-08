@@ -9,7 +9,7 @@ use crate::tasks::workflows::{
     runners::{Arch, Platform, ReleaseChannel},
     steps::{
         CommonJobConditions, CommonPermissionSets, DEFAULT_REPOSITORY_OWNER_GUARD, FluentBuilder,
-        GitRef, NamedJob, RefSha, RepositoryTarget, TokenPermissions,
+        GitRef, NamedJob, OwnerGuard, RefSha, RepositoryTarget, TokenPermissions,
     },
 };
 
@@ -19,7 +19,7 @@ use gh_workflow::*;
 /// Generates the release_nightly.yml workflow
 pub fn release_nightly() -> Workflow {
     let (check_tag, skip) = check_nightly_tag();
-    let mut tests = run_platform_tests_no_filter(Platform::Linux);
+    let mut tests = run_platform_tests_no_filter(Platform::Linux, OwnerGuard::Restricted);
     tests.job = tests
         .job
         .needs([check_tag.name.clone()])
@@ -31,12 +31,12 @@ pub fn release_nightly() -> Workflow {
     const NIGHTLY: Option<ReleaseChannel> = Some(ReleaseChannel::Nightly);
 
     let bundle = ReleaseBundleJobs {
-        linux_aarch64: bundle_linux(Arch::AARCH64, NIGHTLY, &[&tests]),
-        linux_x86_64: bundle_linux(Arch::X86_64, NIGHTLY, &[&tests]),
-        bwrap_linux_aarch64: build_static_bwrap(Arch::AARCH64, &[&tests]),
-        bwrap_linux_x86_64: build_static_bwrap(Arch::X86_64, &[&tests]),
-        mac_aarch64: bundle_mac(Arch::AARCH64, NIGHTLY, &[&tests]),
-        mac_x86_64: bundle_mac(Arch::X86_64, NIGHTLY, &[&tests]),
+        linux_aarch64: bundle_linux(Arch::AARCH64, NIGHTLY, &[&tests], OwnerGuard::Restricted),
+        linux_x86_64: bundle_linux(Arch::X86_64, NIGHTLY, &[&tests], OwnerGuard::Restricted),
+        bwrap_linux_aarch64: build_static_bwrap(Arch::AARCH64, &[&tests], OwnerGuard::Restricted),
+        bwrap_linux_x86_64: build_static_bwrap(Arch::X86_64, &[&tests], OwnerGuard::Restricted),
+        mac_aarch64: bundle_mac(Arch::AARCH64, NIGHTLY, &[&tests], OwnerGuard::Restricted),
+        mac_x86_64: bundle_mac(Arch::X86_64, NIGHTLY, &[&tests], OwnerGuard::Restricted),
         windows_aarch64: bundle_windows(Arch::AARCH64, NIGHTLY, &[&tests]),
         windows_x86_64: bundle_windows(Arch::X86_64, NIGHTLY, &[&tests]),
     };

@@ -92,7 +92,7 @@ impl CheckoutStep {
         self.with_custom_fetch_depth("${{ github.ref == 'refs/heads/main' && 2 || 350 }}")
     }
 
-    pub fn with_token(mut self, token: &StepOutput) -> Self {
+    pub fn with_token(mut self, token: impl std::fmt::Display) -> Self {
         self.token = Some(token.to_string());
         self
     }
@@ -242,6 +242,35 @@ pub fn cleanup_cargo_config(platform: Platform) -> Step<Run> {
     step.if_condition(Expression::new("always()"))
 }
 
+/// GitHub's standard hosted Linux runners ship with ~14GB free, most of it
+/// consumed by preinstalled toolchains (Android SDK, .NET, GHC, CodeQL) this
+/// build doesn't use. Zed's own CI runs on Namespace's larger runners and
+/// never needed this; a cold build of the whole workspace does on stock
+/// GitHub runners.
+pub fn free_disk_space_linux() -> Step<Run> {
+    named::bash(
+        "sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \"${AGENT_TOOLSDIRECTORY:-}\" || true",
+    )
+}
+
+/// Same reasoning as free_disk_space_linux() - removes non-active Xcode
+/// installations and stale x86_64 rustup toolchains that ship preinstalled
+/// on GitHub's standard macOS runners. Pattern from this fork's sibling
+/// "flint" fork.
+pub fn free_disk_space_mac() -> Step<Run> {
+    named::bash(indoc::indoc! {r#"
+        df -h /
+        active_xcode="$(xcode-select -p | sed 's#/Contents/Developer$##')"
+        for xcode_app in /Applications/Xcode_*.app; do
+            if [ "$xcode_app" != "$active_xcode" ]; then
+                sudo rm -rf "$xcode_app" 2>/dev/null || true
+            fi
+        done
+        sudo rm -rf /Users/runner/.rustup/toolchains/1.*-x86_64* 2>/dev/null || true
+        df -h /
+    "#})
+}
+
 pub fn clear_target_dir_if_large(platform: Platform) -> Step<Run> {
     match platform {
         Platform::Windows => named::pwsh("./script/clear-target-dir-if-larger-than.ps1 350 200"),
@@ -265,13 +294,18 @@ pub fn install_rustup_target(target: &str) -> Step<Run> {
 }
 
 pub fn cache_rust_dependencies_namespace() -> Step<Use> {
+    // nscloud-cache-action requires the job to run on a Namespace Cloud
+    // runner (it errors "requires a cache volume to be configured" on
+    // GitHub's standard hosted runners), which forks don't have. Use
+    // GitHub's own cache action instead - functionally equivalent, just
+    // without Namespace's persistent cache volumes.
     named::uses(
-        "namespacelabs",
-        "nscloud-cache-action",
-        "a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9", // v1
+        "actions",
+        "cache",
+        "0057852bfaa89a56745cba8c7296529d2fc39830", // v4.3.0
     )
-    .add_with(("cache", "rust"))
     .add_with(("path", "~/.rustup"))
+    .add_with(("key", "${{ runner.os }}-${{ runner.arch }}-rustup"))
 }
 
 pub fn setup_sccache(platform: Platform) -> Step<Run> {
@@ -298,24 +332,30 @@ pub fn show_sccache_stats(platform: Platform) -> Step<Run> {
 }
 
 pub fn cache_nix_dependencies_namespace() -> Step<Use> {
+    // See cache_rust_dependencies_namespace() - nscloud-cache-action doesn't
+    // work on standard GitHub-hosted runners, so this uses actions/cache.
     named::uses(
-        "namespacelabs",
-        "nscloud-cache-action",
-        "a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9", // v1
+        "actions",
+        "cache",
+        "0057852bfaa89a56745cba8c7296529d2fc39830", // v4.3.0
     )
-    .add_with(("cache", "nix"))
+    .add_with(("path", "/nix"))
+    .add_with(("key", "${{ runner.os }}-${{ runner.arch }}-nix"))
 }
 
 pub fn cache_nix_store_macos() -> Step<Use> {
-    // On macOS, `/nix` is on a read-only root filesystem so nscloud's `cache: nix`
-    // cannot mount or symlink there. Instead we cache a user-writable directory and
-    // use nix-store --import/--export in separate steps to transfer store paths.
+    // On macOS, `/nix` is on a read-only root filesystem so this can't mount
+    // or symlink there. Instead we cache a user-writable directory and use
+    // nix-store --import/--export in separate steps to transfer store paths.
+    // See cache_rust_dependencies_namespace() for why this is actions/cache
+    // rather than nscloud-cache-action.
     named::uses(
-        "namespacelabs",
-        "nscloud-cache-action",
-        "a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9", // v1
+        "actions",
+        "cache",
+        "0057852bfaa89a56745cba8c7296529d2fc39830", // v4.3.0
     )
     .add_with(("path", "~/nix-cache"))
+    .add_with(("key", "${{ runner.os }}-${{ runner.arch }}-nix-cache"))
 }
 
 pub fn setup_linux() -> Step<Run> {
@@ -387,6 +427,31 @@ pub(crate) fn release_job(deps: &[&NamedJob]) -> Job {
     dependant_job(deps)
         .with_repository_owner_guard()
         .timeout_minutes(60u32)
+}
+
+/// Whether a job restricts itself to the zed-industries/zed-extensions orgs.
+/// Some `run_tests` jobs are shared between workflows that keep the
+/// restriction (e.g. nightly releases) and this fork's stable release
+/// pipeline, which needs to actually run them - a per-call-site choice
+/// rather than baking one answer into `release_job()`. `Unrestricted` jobs
+/// also skip dependency caching: zizmor flags `actions/cache` as a
+/// cache-poisoning risk in a workflow that both accepts `workflow_dispatch`
+/// and publishes release artifacts, which every `Unrestricted` job does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerGuard {
+    Restricted,
+    Unrestricted,
+}
+
+pub(crate) fn release_job_with_guard(deps: &[&NamedJob], guard: OwnerGuard) -> Job {
+    match guard {
+        OwnerGuard::Restricted => release_job(deps),
+        // A cold build of the whole workspace with no dependency cache (see
+        // OwnerGuard's doc comment) routinely exceeds 60 minutes on standard
+        // runners; Zed's own CI never hits this because it always has a warm
+        // Namespace cache.
+        OwnerGuard::Unrestricted => dependant_job(deps).timeout_minutes(120u32),
+    }
 }
 
 pub(crate) fn dependant_job(deps: &[&NamedJob]) -> Job {
@@ -922,7 +987,11 @@ pub(crate) struct BotCommitStep {
 }
 
 impl BotCommitStep {
-    pub fn new(message: impl ToString, branch: impl ToString, token: &StepOutput) -> Self {
+    pub fn new(
+        message: impl ToString,
+        branch: impl ToString,
+        token: impl std::fmt::Display,
+    ) -> Self {
         Self {
             message: message.to_string(),
             branch: branch.to_string(),
@@ -1051,7 +1120,7 @@ impl From<RefOp> for Step<Use> {
 pub(crate) fn create_ref(
     git_ref: GitRef,
     sha: impl Into<RefSha>,
-    token: &StepOutput,
+    token: impl std::fmt::Display,
 ) -> impl Into<Step<Use>> {
     RefOp {
         git_ref,

@@ -29,10 +29,10 @@ jobs:
       with:
         clean: false
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
         path: ~/.rustup
+        key: ${{ runner.os }}-${{ runner.arch }}-rustup
     - name: steps::setup_sentry
       uses: matbour/setup-sentry-cli@3e938c54b3018bdd019973689ef984e033b0454b
       with:
@@ -55,7 +55,7 @@ jobs:
         name: zed-remote-server-linux-aarch64.gz
         path: target/zed-remote-server-linux-aarch64.gz
         if-no-files-found: error
-    timeout-minutes: 60
+    timeout-minutes: 240
   bundle_linux_x86_64:
     if: |-
       (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
@@ -73,10 +73,10 @@ jobs:
       with:
         clean: false
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
         path: ~/.rustup
+        key: ${{ runner.os }}-${{ runner.arch }}-rustup
     - name: steps::setup_sentry
       uses: matbour/setup-sentry-cli@3e938c54b3018bdd019973689ef984e033b0454b
       with:
@@ -99,7 +99,7 @@ jobs:
         name: zed-remote-server-linux-x86_64.gz
         path: target/zed-remote-server-linux-x86_64.gz
         if-no-files-found: error
-    timeout-minutes: 60
+    timeout-minutes: 240
   build_static_bwrap_linux_aarch64:
     if: |-
       (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
@@ -107,9 +107,10 @@ jobs:
     runs-on: namespace-profile-8x32-ubuntu-2004-arm-m4
     steps:
     - name: steps::cache_nix_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: nix
+        path: /nix
+        key: ${{ runner.os }}-${{ runner.arch }}-nix
     - name: run_bundling::build_static_bwrap
       uses: cachix/install-nix-action@02a151ada4993995686f9ed4f1be7cfbb229e56f
       with:
@@ -141,9 +142,10 @@ jobs:
     runs-on: namespace-profile-32x64-ubuntu-2004
     steps:
     - name: steps::cache_nix_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: nix
+        path: /nix
+        key: ${{ runner.os }}-${{ runner.arch }}-nix
     - name: run_bundling::build_static_bwrap
       uses: cachix/install-nix-action@02a151ada4993995686f9ed4f1be7cfbb229e56f
       with:
@@ -188,10 +190,10 @@ jobs:
       with:
         clean: false
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
         path: ~/.rustup
+        key: ${{ runner.os }}-${{ runner.arch }}-rustup
     - name: steps::setup_node
       uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
       with:
@@ -218,7 +220,7 @@ jobs:
         name: zed-remote-server-macos-aarch64.gz
         path: target/zed-remote-server-macos-aarch64.gz
         if-no-files-found: error
-    timeout-minutes: 60
+    timeout-minutes: 240
   bundle_mac_x86_64:
     if: |-
       (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
@@ -239,10 +241,10 @@ jobs:
       with:
         clean: false
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
         path: ~/.rustup
+        key: ${{ runner.os }}-${{ runner.arch }}-rustup
     - name: steps::setup_node
       uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
       with:
@@ -269,7 +271,7 @@ jobs:
         name: zed-remote-server-macos-x86_64.gz
         path: target/zed-remote-server-macos-x86_64.gz
         if-no-files-found: error
-    timeout-minutes: 60
+    timeout-minutes: 240
   bundle_windows_aarch64:
     if: |-
       (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
@@ -293,10 +295,6 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
-    - name: steps::setup_sentry
-      uses: matbour/setup-sentry-cli@3e938c54b3018bdd019973689ef984e033b0454b
-      with:
-        token: ${{ secrets.SENTRY_AUTH_TOKEN }}
     - name: steps::clear_target_dir_if_large
       run: ./script/clear-target-dir-if-larger-than.ps1 350 200
       shell: pwsh
@@ -316,7 +314,7 @@ jobs:
         name: zed-remote-server-windows-aarch64.zip
         path: target/zed-remote-server-windows-aarch64.zip
         if-no-files-found: error
-    timeout-minutes: 60
+    timeout-minutes: 240
   bundle_windows_x86_64:
     if: |-
       (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
@@ -363,7 +361,7 @@ jobs:
         name: zed-remote-server-windows-x86_64.zip
         path: target/zed-remote-server-windows-x86_64.zip
         if-no-files-found: error
-    timeout-minutes: 60
+    timeout-minutes: 240
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true

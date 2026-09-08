@@ -17,7 +17,9 @@ use crate::tasks::workflows::{
 use super::{
     deploy_docs,
     runners::{self, Arch, Platform},
-    steps::{self, FluentBuilder, NamedJob, named, release_job},
+    steps::{
+        self, FluentBuilder, NamedJob, OwnerGuard, named, release_job, release_job_with_guard,
+    },
 };
 
 pub(crate) fn run_tests() -> Workflow {
@@ -49,19 +51,29 @@ pub(crate) fn run_tests() -> Workflow {
     let mut jobs = vec![
         orchestrate,
         check_style(),
-        should_run_tests
-            .and_not_in_merge_queue()
-            .then(clippy(Platform::Windows, None, true)),
-        should_run_tests
-            .and_always()
-            .then(clippy(Platform::Linux, None, true)),
-        should_run_tests
-            .and_not_in_merge_queue()
-            .then(clippy(Platform::Mac, None, true)),
+        should_run_tests.and_not_in_merge_queue().then(clippy(
+            Platform::Windows,
+            None,
+            true,
+            OwnerGuard::Restricted,
+        )),
+        should_run_tests.and_always().then(clippy(
+            Platform::Linux,
+            None,
+            true,
+            OwnerGuard::Restricted,
+        )),
+        should_run_tests.and_not_in_merge_queue().then(clippy(
+            Platform::Mac,
+            None,
+            true,
+            OwnerGuard::Restricted,
+        )),
         should_run_tests.and_not_in_merge_queue().then(clippy(
             Platform::Mac,
             Some(Arch::X86_64),
             true,
+            OwnerGuard::Restricted,
         )),
         should_run_tests
             .and_not_in_merge_queue()
@@ -92,7 +104,9 @@ pub(crate) fn run_tests() -> Workflow {
         should_check_licences
             .and_not_in_merge_queue()
             .then(check_licenses()),
-        should_check_scripts.and_always().then(check_scripts(true)),
+        should_check_scripts
+            .and_always()
+            .then(check_scripts(true, OwnerGuard::Restricted)),
     ];
     let ext_tests = extension_tests();
     let tests_pass = tests_pass(&jobs, &[&ext_tests.name]);
@@ -541,7 +555,12 @@ fn check_workspace_binaries() -> NamedJob {
     ))
 }
 
-pub(crate) fn clippy(platform: Platform, arch: Option<Arch>, harden: bool) -> NamedJob {
+pub(crate) fn clippy(
+    platform: Platform,
+    arch: Option<Arch>,
+    harden: bool,
+    guard: OwnerGuard,
+) -> NamedJob {
     let target = arch.map(|arch| match (platform, arch) {
         (Platform::Mac, Arch::X86_64) => "x86_64-apple-darwin",
         (Platform::Mac, Arch::AARCH64) => "aarch64-apple-darwin",
@@ -552,15 +571,20 @@ pub(crate) fn clippy(platform: Platform, arch: Option<Arch>, harden: bool) -> Na
         Platform::Linux => runners::LINUX_DEFAULT,
         Platform::Mac => runners::MAC_DEFAULT,
     };
-    let mut job = release_job(&[])
+    let mut job = release_job_with_guard(&[], guard)
         .runs_on(runner)
         .when(harden && platform == Platform::Linux, |this| {
             this.add_step(steps::harden_runner())
         })
         .add_step(steps::checkout_repo())
+        .when(
+            guard == OwnerGuard::Unrestricted && platform == Platform::Mac,
+            |this| this.add_step(steps::free_disk_space_mac()),
+        )
         .add_step(steps::setup_cargo_config(platform))
         .when(
-            platform == Platform::Linux || platform == Platform::Mac,
+            guard == OwnerGuard::Restricted
+                && (platform == Platform::Linux || platform == Platform::Mac),
             |this| this.add_step(steps::cache_rust_dependencies_namespace()),
         )
         .when(
@@ -584,14 +608,19 @@ pub(crate) fn clippy(platform: Platform, arch: Option<Arch>, harden: bool) -> Na
 }
 
 pub(crate) fn run_platform_tests(platform: Platform) -> NamedJob {
-    run_platform_tests_impl(platform, true, true)
+    run_platform_tests_impl(platform, true, true, OwnerGuard::Restricted)
 }
 
-pub(crate) fn run_platform_tests_no_filter(platform: Platform) -> NamedJob {
-    run_platform_tests_impl(platform, false, false)
+pub(crate) fn run_platform_tests_no_filter(platform: Platform, guard: OwnerGuard) -> NamedJob {
+    run_platform_tests_impl(platform, false, false, guard)
 }
 
-fn run_platform_tests_impl(platform: Platform, filter_packages: bool, harden: bool) -> NamedJob {
+fn run_platform_tests_impl(
+    platform: Platform,
+    filter_packages: bool,
+    harden: bool,
+    guard: OwnerGuard,
+) -> NamedJob {
     let runner = match platform {
         Platform::Windows => runners::WINDOWS_DEFAULT,
         Platform::Linux => runners::LINUX_DEFAULT,
@@ -599,7 +628,7 @@ fn run_platform_tests_impl(platform: Platform, filter_packages: bool, harden: bo
     };
     NamedJob {
         name: format!("run_tests_{platform}"),
-        job: release_job(&[])
+        job: release_job_with_guard(&[], guard)
             .runs_on(runner)
             .when(platform == Platform::Linux, |job| {
                 job.add_service(
@@ -619,13 +648,24 @@ fn run_platform_tests_impl(platform: Platform, filter_packages: bool, harden: bo
                 this.add_step(steps::harden_runner())
             })
             .add_step(steps::checkout_repo())
+            .when(
+                guard == OwnerGuard::Unrestricted && platform == Platform::Linux,
+                |this| this.add_step(steps::free_disk_space_linux()),
+            )
+            .when(
+                guard == OwnerGuard::Unrestricted && platform == Platform::Mac,
+                |this| this.add_step(steps::free_disk_space_mac()),
+            )
             .add_step(steps::setup_cargo_config(platform))
-            .when(platform == Platform::Mac, |this| {
-                this.add_step(steps::cache_rust_dependencies_namespace())
-            })
-            .when(platform == Platform::Linux, |this| {
-                use_clang(this.add_step(steps::cache_rust_dependencies_namespace()))
-            })
+            .when(
+                guard == OwnerGuard::Restricted && platform == Platform::Mac,
+                |this| this.add_step(steps::cache_rust_dependencies_namespace()),
+            )
+            .when(
+                guard == OwnerGuard::Restricted && platform == Platform::Linux,
+                |this| this.add_step(steps::cache_rust_dependencies_namespace()),
+            )
+            .when(platform == Platform::Linux, use_clang)
             .when(
                 platform == Platform::Linux,
                 steps::install_linux_dependencies,
@@ -784,7 +824,7 @@ fn check_licenses() -> NamedJob {
     )
 }
 
-pub(crate) fn check_scripts(harden: bool) -> NamedJob {
+pub(crate) fn check_scripts(harden: bool, guard: OwnerGuard) -> NamedJob {
     fn download_actionlint() -> Step<Run> {
         named::bash(
             "bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)",
@@ -825,12 +865,14 @@ pub(crate) fn check_scripts(harden: bool) -> NamedJob {
     }
 
     named::job(
-        release_job(&[])
+        release_job_with_guard(&[], guard)
             .runs_on(runners::LINUX_LARGE)
             .when(harden, |this| this.add_step(steps::harden_runner()))
             .add_step(steps::checkout_repo())
             .add_step(run_shellcheck())
-            .add_step(cache_rust_dependencies_namespace())
+            .when(guard == OwnerGuard::Restricted, |this| {
+                this.add_step(cache_rust_dependencies_namespace())
+            })
             .add_step(check_xtask_workflows())
             .add_step(download_actionlint().id("get_actionlint"))
             .add_step(run_actionlint())

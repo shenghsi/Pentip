@@ -440,6 +440,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs a real or software GPU adapter, unavailable on standard \
+                GitHub-hosted Linux runners (test_device_and_queue's request_adapter fails)"]
     fn before_frame_skips_uploads_for_removed_texture() -> anyhow::Result<()> {
         let (device, queue) = test_device_and_queue()?;
 
@@ -464,6 +466,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs a real or software GPU adapter, unavailable on standard \
+                GitHub-hosted Linux runners (test_device_and_queue's request_adapter fails)"]
     fn remove_deallocates_tile_space_for_reuse() -> anyhow::Result<()> {
         let (device, queue) = test_device_and_queue()?;
         let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);

@@ -1,15 +1,22 @@
 #!/usr/bin/env sh
 set -eu
 
-# Downloads a tarball from https://zed.dev/releases and unpacks it
-# into ~/.local/. If you'd prefer to do this manually, instructions are at
-# https://zed.dev/docs/linux.
+# Downloads a release archive from GitHub Releases and unpacks it into ~/.local/.
+# Set ZED_VERSION to a tag (for example, v0.0.1) to install that version.
+# The default is the latest release in the selected channel.
 
 main() {
     platform="$(uname -s)"
     arch="$(uname -m)"
     channel="${ZED_CHANNEL:-stable}"
     ZED_VERSION="${ZED_VERSION:-latest}"
+    case "$channel" in
+        stable | nightly) ;;
+        *)
+            echo "Unsupported release channel: $channel" >&2
+            exit 1
+            ;;
+    esac
     # Use TMPDIR if available (for environments with non-standard temp directories)
     if [ -n "${TMPDIR:-}" ] && [ -d "${TMPDIR}" ]; then
         temp="$(mktemp -d "$TMPDIR/zed-XXXXXX")"
@@ -78,12 +85,29 @@ main() {
     fi
 }
 
+github_release_url() {
+    asset="$1"
+    if [ "$ZED_VERSION" = "latest" ]; then
+        if [ "$channel" = "nightly" ]; then
+            echo "https://github.com/shenghsi/Pentip/releases/download/nightly/$asset"
+        else
+            echo "https://github.com/shenghsi/Pentip/releases/latest/download/$asset"
+        fi
+    else
+        case "$ZED_VERSION" in
+            v*) tag="$ZED_VERSION" ;;
+            *) tag="v$ZED_VERSION" ;;
+        esac
+        echo "https://github.com/shenghsi/Pentip/releases/download/$tag/$asset"
+    fi
+}
+
 linux() {
     if [ -n "${ZED_BUNDLE_PATH:-}" ]; then
         cp "$ZED_BUNDLE_PATH" "$temp/zed-linux-$arch.tar.gz"
     else
         echo "Downloading Zed version: $ZED_VERSION"
-        curl "https://cloud.zed.dev/releases/$channel/$ZED_VERSION/download?asset=zed&arch=$arch&os=linux&source=install.sh" > "$temp/zed-linux-$arch.tar.gz"
+        curl "$(github_release_url "zed-linux-$arch.tar.gz")" > "$temp/zed-linux-$arch.tar.gz"
     fi
 
     suffix=""
@@ -152,7 +176,7 @@ linux() {
 
 macos() {
     echo "Downloading Zed version: $ZED_VERSION"
-    curl "https://cloud.zed.dev/releases/$channel/$ZED_VERSION/download?asset=zed&os=macos&arch=$arch&source=install.sh" > "$temp/Zed-$arch.dmg"
+    curl "$(github_release_url "Zed-$arch.dmg")" > "$temp/Zed-$arch.dmg"
     hdiutil attach -quiet "$temp/Zed-$arch.dmg" -mountpoint "$temp/mount"
     app="$(cd "$temp/mount/"; echo *.app)"
     echo "Installing $app"
