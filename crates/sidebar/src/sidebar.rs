@@ -364,6 +364,7 @@ struct ThreadEntry {
 #[derive(Clone)]
 struct TerminalEntry {
     metadata: TerminalThreadMetadata,
+    icon: IconName,
     workspace: ThreadEntryWorkspace,
     worktrees: Vec<ThreadItemWorktreeInfo>,
     has_notification: bool,
@@ -1455,6 +1456,7 @@ impl Sidebar {
             };
             let linked_worktree_path_lists =
                 linked_worktree_path_lists_for_workspaces(group_workspaces, cx);
+            let terminal_store = TerminalThreadMetadataStore::global(cx);
             let make_terminal_entry =
                 |metadata: TerminalThreadMetadata, workspace: ThreadEntryWorkspace| {
                     let worktrees =
@@ -1462,6 +1464,15 @@ impl Sidebar {
                     let has_notification =
                         live_notified_terminal_ids.contains(&metadata.terminal_id);
                     TerminalEntry {
+                        icon: if terminal_store
+                            .read(cx)
+                            .active_agent_program(metadata.terminal_id)
+                            == Some("codex")
+                        {
+                            IconName::AiOpenAi
+                        } else {
+                            IconName::Terminal
+                        },
                         metadata,
                         workspace,
                         worktrees,
@@ -1471,7 +1482,6 @@ impl Sidebar {
                 };
 
             let mut terminals = Vec::new();
-            let terminal_store = TerminalThreadMetadataStore::global(cx);
             let group_host = group_key.host();
             let mut push_terminal_metadata =
                 |metadata: TerminalThreadMetadata, workspace: ThreadEntryWorkspace| {
@@ -5830,6 +5840,7 @@ impl Sidebar {
                     let timestamp: SharedString =
                         format_history_entry_timestamp(terminal.metadata.created_at).into();
                     Some(ThreadSwitcherEntry::Terminal(ThreadSwitcherTerminalEntry {
+                        icon: terminal.icon,
                         metadata: terminal.metadata.clone(),
                         workspace: terminal.workspace.clone(),
                         project_name: current_header_label.clone(),
@@ -6499,7 +6510,7 @@ impl Sidebar {
 
         ThreadItem::new(id, title)
             .base_bg(sidebar_bg)
-            .icon(IconName::Terminal)
+            .icon(terminal.icon)
             .when_some(icon_char, |this, icon_char| this.icon_char(icon_char))
             .is_remote(is_remote)
             .worktrees(worktrees)

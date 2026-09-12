@@ -34,6 +34,7 @@ pub(crate) struct ThreadSwitcherThreadEntry {
 #[derive(Clone)]
 pub(crate) struct ThreadSwitcherTerminalEntry {
     pub metadata: TerminalThreadMetadata,
+    pub icon: IconName,
     pub(super) workspace: ThreadEntryWorkspace,
     pub project_name: Option<SharedString>,
     pub worktrees: Vec<ThreadItemWorktreeInfo>,
@@ -97,7 +98,7 @@ impl ThreadSwitcherEntry {
         match self {
             Self::Thread(entry) if entry.is_draft => IconName::Circle,
             Self::Thread(entry) => entry.icon,
-            Self::Terminal(_) => IconName::Terminal,
+            Self::Terminal(entry) => entry.icon,
         }
     }
 

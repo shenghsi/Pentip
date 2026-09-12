@@ -326,6 +326,8 @@ actions!(
         ImportThreadsFromOtherChannels,
         /// Starts a new terminal thread.
         NewTerminalThread,
+        /// Starts a new Codex CLI terminal thread.
+        NewCodexTerminalThread,
     ]
 );
 

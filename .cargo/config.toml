@@ -22,3 +22,8 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 [env]
 MACOSX_DEPLOYMENT_TARGET = "10.15.7"
+
+[future-incompat-report]
+# `block` 0.1.6 is an unmaintained transitive macOS dependency. Its replacement
+# requires Cocoa, Metal, and Core Video dependency migrations.
+frequency = "never"
