@@ -10,7 +10,7 @@ Pentip can connect external agents through the Agent Client Protocol (ACP).
 Some users want to use the native agent CLI instead. They want the CLI to run
 in an Agent Panel terminal and appear in the Threads Sidebar.
 
-The first supported direct launch is Codex CLI.
+The supported direct launches are Codex CLI and Claude Code CLI.
 
 This design keeps the change close to Zed upstream. It uses the existing
 Terminal Thread code in `agent_ui`. It does not port the separate Flint
@@ -23,6 +23,9 @@ Terminal Thread code in `agent_ui`. It does not port the separate Flint
 3. Pentip opens a terminal in the current project folder.
 4. Pentip sends `codex` to the terminal shell.
 5. The terminal appears as **Codex** in the Agent Panel and Threads Sidebar.
+
+Select **Claude Code CLI** for the same flow with Claude Code. Pentip starts a
+new Claude session with `claude --session-id <terminal-id>`.
 
 The normal **Terminal** option stays available. It opens a terminal without a
 fixed agent command.
@@ -160,9 +163,10 @@ the matching Codex session record, extracts the full session UUID, and runs
 `codex resume <session-id>`. It does not use `codex resume --last`.
 
 New **Terminal** threads install a shell function for `codex` in POSIX shells,
-Fish, and PowerShell. The function adds the thread ID title setting and passes
-the command arguments to Codex. This lets a manually started Codex session use
-the same resume path. The function does not change global Codex settings.
+Fish, and PowerShell. They also install a shell function for `claude`. The
+Claude function adds `--session-id <terminal-id>` for a new session. It keeps
+explicit `--resume`, `--continue`, and `--session-id` arguments unchanged. The
+functions do not change global CLI settings.
 Commands that bypass the function, and other shells, must set
 `-c 'tui.terminal_title=["thread-name","thread-id"]'` to publish the session ID.
 
@@ -199,6 +203,11 @@ Select a Codex session to open it in an Agent Panel terminal with
 already has a Terminal Thread in Pentip, Pentip opens that terminal.
 
 This history scan does not read sessions on remote or WSL hosts.
+
+The same history view reads Claude sessions from `history.jsonl` and
+`projects/**/*.jsonl` under `CLAUDE_CONFIG_DIR`, or `~/.claude` when that
+variable is not set. Select a Claude session to run
+`claude --resume <session-id>` in its saved working folder.
 
 ## Future CLI Options {#codex-cli-terminal-threads-future-options}
 

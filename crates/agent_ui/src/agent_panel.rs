@@ -42,7 +42,8 @@ use crate::completion_provider::{AgentContextSelection, AgentContextSource};
 use crate::terminal_agent_status::DetectedTerminalAgentStatus;
 use crate::terminal_thread_metadata_store::{
     TerminalAgentStatus, TerminalThreadMetadata, TerminalThreadMetadataStore,
-    codex_thread_display_title, compose_terminal_thread_title, terminal_title_without_prefix,
+    claude_thread_display_title, codex_thread_display_title, compose_terminal_thread_title,
+    terminal_title_without_prefix,
 };
 use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore, ThreadMetadataStoreEvent};
 use crate::{
@@ -51,9 +52,10 @@ use crate::{
 };
 use crate::{
     AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
-    NewCodexTerminalThread, NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown,
-    OpenAgentDiff, ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell,
-    ShowAllSidebarThreadMetadata, ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
+    NewClaudeTerminalThread, NewCodexTerminalThread, NewTerminalThread, NewThread,
+    OpenActiveThreadAsMarkdown, OpenAgentDiff, ResetFastModeWarnings, ResetTrialEndUpsell,
+    ResetTrialUpsell, ShowAllSidebarThreadMetadata, ShowThreadMetadata, ToggleNewThreadMenu,
+    ToggleOptionsMenu,
     conversation_view::{
         AcpThreadViewEvent, RootThreadUpdated, ThreadView, reset_fast_mode_warnings,
     },
@@ -414,6 +416,19 @@ pub fn init(cx: &mut App) {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         panel.update(cx, |panel, cx| {
                             panel.new_codex_terminal(
+                                Some(workspace),
+                                AgentThreadSource::AgentPanel,
+                                window,
+                                cx,
+                            )
+                        });
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    }
+                })
+                .register_action(|workspace, _: &NewClaudeTerminalThread, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            panel.new_claude_terminal(
                                 Some(workspace),
                                 AgentThreadSource::AgentPanel,
                                 window,
@@ -1075,13 +1090,19 @@ impl AgentTerminal {
             terminal_title.as_ref(),
             custom_title.as_ref().map(|title| title.as_ref()),
         );
-        if self.agent_cli.as_deref() == Some("codex")
-            && custom_title.is_none()
-            && let Some(session_prefix) = self.agent_cli_session_prefix.as_deref()
-        {
-            codex_thread_display_title(title.as_ref(), session_prefix)
-        } else {
-            title
+        if custom_title.is_some() {
+            return title;
+        }
+        match self.agent_cli.as_deref() {
+            Some("codex") => {
+                if let Some(session_prefix) = self.agent_cli_session_prefix.as_deref() {
+                    codex_thread_display_title(title.as_ref(), session_prefix)
+                } else {
+                    title
+                }
+            }
+            Some("claude") => claude_thread_display_title(title.as_ref()),
+            _ => title,
         }
     }
 
@@ -2095,6 +2116,21 @@ impl AgentPanel {
         self.spawn_agent_cli_terminal(working_directory, "Codex", "codex", source, window, cx);
     }
 
+    pub fn new_claude_terminal(
+        &mut self,
+        workspace: Option<&Workspace>,
+        source: AgentThreadSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.supports_terminal(cx) {
+            return;
+        }
+        self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Terminal, cx);
+        let working_directory = self.terminal_working_directory(workspace, cx);
+        self.spawn_agent_cli_terminal(working_directory, "Claude", "claude", source, window, cx);
+    }
+
     #[cfg(not(test))]
     fn spawn_agent_cli_terminal(
         &mut self,
@@ -2105,18 +2141,21 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let terminal_id = TerminalId::new();
+        let startup_command = Self::agent_cli_start_command(command, Some(terminal_id));
+        let session_id = (command == "claude").then(|| terminal_id.to_key_string());
         self.spawn_terminal(
-            TerminalId::new(),
+            terminal_id,
             working_directory,
-            (command != "codex").then(|| SharedString::from(title)),
+            (command != "codex" && command != "claude").then(|| SharedString::from(title)),
             Some(SharedString::from(title)),
             None,
             true,
             true,
             true,
-            Some(Self::agent_cli_start_command(command)),
+            Some(startup_command),
             Some(command.to_string()),
-            None,
+            session_id,
             source,
             window,
             cx,
@@ -2134,12 +2173,16 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         let terminal_id = TerminalId::new();
-        let startup_commands =
-            Self::terminal_startup_commands(true, Some(Self::agent_cli_start_command(command)), cx);
+        let session_id = (command == "claude").then(|| terminal_id.to_key_string());
+        let startup_commands = Self::terminal_startup_commands(
+            true,
+            Some(Self::agent_cli_start_command(command, Some(terminal_id))),
+            cx,
+        );
         if let Err(error) = self.insert_display_only_terminal(
             terminal_id,
             working_directory,
-            (command != "codex").then(|| SharedString::from(title)),
+            (command != "codex" && command != "claude").then(|| SharedString::from(title)),
             Some(SharedString::from(title)),
             None,
             true,
@@ -2159,6 +2202,12 @@ impl AgentPanel {
             .map(|terminal| terminal.view.read(cx).terminal().clone())
         {
             Self::write_terminal_startup_commands(&terminal, startup_commands, cx);
+        }
+        if let Some(session_id) = session_id
+            && let Some(terminal) = self.terminals.get_mut(&terminal_id)
+        {
+            terminal.agent_cli_session_prefix = Some(session_id);
+            self.persist_terminal_metadata(terminal_id, cx);
         }
     }
 
@@ -2248,8 +2297,10 @@ impl AgentPanel {
             this.update_in(cx, |this, window, cx| {
                 let mut startup_commands = startup_commands;
                 if agent_cli.is_none()
-                    && let Some(command) =
-                        Self::terminal_codex_session_command(terminal.read(cx).shell_kind())
+                    && let Some(command) = Self::terminal_agent_session_command(
+                        terminal.read(cx).shell_kind(),
+                        terminal_id,
+                    )
                 {
                     startup_commands.insert(0, command);
                     startup_commands.insert(
@@ -2313,17 +2364,21 @@ impl AgentPanel {
             .collect()
     }
 
-    fn terminal_codex_session_command(shell_kind: task::ShellKind) -> Option<String> {
+    fn terminal_agent_session_command(
+        shell_kind: task::ShellKind,
+        terminal_id: TerminalId,
+    ) -> Option<String> {
+        let session_id = terminal_id.to_key_string();
         match shell_kind {
-            task::ShellKind::Posix => Some(
-                "codex() { command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' \"$@\"; }".to_string(),
-            ),
-            task::ShellKind::Fish => Some(
-                "function codex; command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' $argv; end".to_string(),
-            ),
-            task::ShellKind::PowerShell | task::ShellKind::Pwsh => Some(
-                "function codex { & (Get-Command codex -CommandType Application -ErrorAction Stop) -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' @args }".to_string(),
-            ),
+            task::ShellKind::Posix => Some(format!(
+                "codex() {{ command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' \"$@\"; }}; claude() {{ case \" $* \" in *\" --resume \"*|*\" --resume=\"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*|*\" --session-id \"*|*\" --session-id=\"*) command claude \"$@\";; *) command claude --session-id {session_id} \"$@\";; esac; }}"
+            )),
+            task::ShellKind::Fish => Some(format!(
+                "function codex; command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' $argv; end; function claude; if contains -- --resume $argv; or contains -- -r $argv; or contains -- --continue $argv; or contains -- -c $argv; or contains -- --session-id $argv; command claude $argv; else; command claude --session-id {session_id} $argv; end; end"
+            )),
+            task::ShellKind::PowerShell | task::ShellKind::Pwsh => Some(format!(
+                "function codex {{ & (Get-Command codex -CommandType Application -ErrorAction Stop) -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' @args }}; function claude {{ $claudeArgs = $args; $hasSessionArgument = $claudeArgs | Where-Object {{ $_ -in @('--resume', '-r', '--continue', '-c', '--session-id') -or $_ -like '--resume=*' -or $_ -like '--session-id=*' }}; if ($hasSessionArgument) {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) @claudeArgs }} else {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) --session-id {session_id} @claudeArgs }} }}"
+            )),
             _ => None,
         }
     }
@@ -2335,10 +2390,14 @@ impl AgentPanel {
         }
     }
 
-    fn agent_cli_start_command(command: &str) -> String {
+    fn agent_cli_start_command(command: &str, terminal_id: Option<TerminalId>) -> String {
         match command {
             "codex" => "codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]'"
                 .to_string(),
+            "claude" => terminal_id.map_or_else(
+                || "claude".to_string(),
+                |terminal_id| format!("claude --session-id {}", terminal_id.to_key_string()),
+            ),
             _ => command.to_string(),
         }
     }
@@ -2348,6 +2407,10 @@ impl AgentPanel {
         session_prefix: &str,
         path_style: PathStyle,
     ) -> Option<String> {
+        if agent_cli == "claude" {
+            let session_id = uuid::Uuid::parse_str(session_prefix).ok()?;
+            return Some(format!("claude --resume {session_id}"));
+        }
         if agent_cli != "codex" || codex_session_prefix(&format!("{session_prefix}...")).is_none() {
             return None;
         }
@@ -2656,6 +2719,9 @@ impl AgentPanel {
                     terminal.agent_cli_session_prefix = None;
                 }
                 terminal.agent_cli = Some(program.clone());
+                if program == "claude" && terminal.agent_cli_session_prefix.is_none() {
+                    terminal.agent_cli_session_prefix = Some(terminal_id.to_key_string());
+                }
             }
             terminal.refresh_metadata(cx);
             Some(active_program)
@@ -2826,7 +2892,7 @@ impl AgentPanel {
                             PathStyle::Unix => "printf '%s\\n' 'Pentip cannot resume this Codex thread because its saved session ID is missing'".to_string(),
                         }
                     } else {
-                        Self::agent_cli_start_command(agent_cli)
+                        Self::agent_cli_start_command(agent_cli, Some(metadata.terminal_id))
                     }
                 })
         });
@@ -6219,11 +6285,18 @@ impl AgentPanel {
             .and_then(|terminal_id| self.terminals.get(&terminal_id))
             .and_then(|terminal| terminal.last_observed_program.as_deref());
         let showing_codex = active_terminal_agent_program == Some("codex");
+        let showing_claude = active_terminal_agent_program == Some("claude");
 
         let (selected_agent_custom_icon, selected_agent_label) = if showing_terminal {
             (
                 None,
-                SharedString::from(if showing_codex { "Codex" } else { "Terminal" }),
+                SharedString::from(if showing_codex {
+                    "Codex"
+                } else if showing_claude {
+                    "Claude"
+                } else {
+                    "Terminal"
+                }),
             )
         } else if let Agent::Custom { id, .. } = &self.selected_agent {
             let store = agent_server_store.read(cx);
@@ -6333,6 +6406,33 @@ impl AgentPanel {
                                                     {
                                                         panel.update(cx, |panel, cx| {
                                                             panel.new_codex_terminal(
+                                                                Some(workspace),
+                                                                AgentThreadSource::AgentPanel,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        });
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }),
+                            )
+                            .item(
+                                ContextMenuEntry::new("Claude Code CLI")
+                                    .action(Box::new(NewClaudeTerminalThread))
+                                    .icon(IconName::AiClaude)
+                                    .icon_color(Color::Muted)
+                                    .handler({
+                                        let workspace = workspace.clone();
+                                        move |window, cx| {
+                                            if let Some(workspace) = workspace.upgrade() {
+                                                workspace.update(cx, |workspace, cx| {
+                                                    if let Some(panel) =
+                                                        workspace.panel::<AgentPanel>(cx)
+                                                    {
+                                                        panel.update(cx, |panel, cx| {
+                                                            panel.new_claude_terminal(
                                                                 Some(workspace),
                                                                 AgentThreadSource::AgentPanel,
                                                                 window,
@@ -6460,6 +6560,8 @@ impl AgentPanel {
         let selected_agent_builtin_icon = if showing_terminal {
             Some(if showing_codex {
                 IconName::AiOpenAi
+            } else if showing_claude {
+                IconName::AiClaude
             } else {
                 IconName::Terminal
             })
@@ -6928,6 +7030,12 @@ impl Render for AgentPanel {
                 cx.stop_propagation();
                 this.new_codex_terminal(None, AgentThreadSource::AgentPanel, window, cx);
             }))
+            .on_action(
+                cx.listener(|this, _: &NewClaudeTerminalThread, window, cx| {
+                    cx.stop_propagation();
+                    this.new_claude_terminal(None, AgentThreadSource::AgentPanel, window, cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_configuration(window, cx);
             }))
@@ -7385,8 +7493,9 @@ mod tests {
         let executable = directory.path().join("codex");
         std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n")?;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
-        let command = AgentPanel::terminal_codex_session_command(task::ShellKind::Posix)
-            .expect("POSIX shell should have a Codex function");
+        let command =
+            AgentPanel::terminal_agent_session_command(task::ShellKind::Posix, TerminalId::new())
+                .expect("POSIX shell should have a Codex function");
         for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
             if shell != "/bin/sh" && !Path::new(shell).is_file() {
                 continue;
@@ -7406,6 +7515,48 @@ mod tests {
                 "-c\ntui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]\nresume\nsession with spaces\n--no-alt-screen\n"
             );
         }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_terminal_claude_command_assigns_only_new_session_ids() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir()?;
+        let executable = directory.path().join("claude");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
+        let terminal_id = TerminalId::new();
+        let session_id = terminal_id.to_key_string();
+        let command =
+            AgentPanel::terminal_agent_session_command(task::ShellKind::Posix, terminal_id)
+                .expect("POSIX shell should have a Claude function");
+
+        let new_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; claude 'initial prompt'")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(
+            String::from_utf8(new_output.stdout)?,
+            format!("--session-id\n{session_id}\ninitial prompt\n")
+        );
+
+        let resume_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args([
+                    "-c",
+                    &format!("{command}; claude --resume existing-session"),
+                ])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(
+            String::from_utf8(resume_output.stdout)?,
+            "--resume\nexisting-session\n"
+        );
         Ok(())
     }
 
@@ -7461,6 +7612,25 @@ mod tests {
         assert!(
             AgentPanel::agent_cli_resume_command("codex", "invalid; command", PathStyle::Unix)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn test_claude_start_and_resume_commands_use_session_id() {
+        let terminal_id = TerminalId::new();
+        let session_id = terminal_id.to_key_string();
+
+        assert_eq!(
+            AgentPanel::agent_cli_start_command("claude", Some(terminal_id)),
+            format!("claude --session-id {session_id}")
+        );
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("claude", &session_id, PathStyle::Unix),
+            Some(format!("claude --resume {session_id}"))
+        );
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("claude", "invalid; command", PathStyle::Unix),
+            None
         );
     }
 
@@ -8356,7 +8526,7 @@ mod tests {
         assert_eq!(
             input_log,
             vec![AgentPanel::terminal_startup_input(vec![
-                AgentPanel::terminal_codex_session_command(task::ShellKind::Posix)
+                AgentPanel::terminal_agent_session_command(task::ShellKind::Posix, terminal_id,)
                     .expect("POSIX shell should have a Codex function"),
                 AgentPanel::terminal_clear_command(task::ShellKind::Posix),
                 "printf 'init_ran_%s\\n' 42".to_string(),

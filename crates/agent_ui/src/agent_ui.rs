@@ -34,6 +34,7 @@ mod thread_import;
 pub mod thread_metadata_store;
 pub mod thread_worktree_archive;
 
+mod claude_thread_history;
 mod codex_thread_history;
 pub mod threads_archive_view;
 mod ui;
@@ -330,6 +331,8 @@ actions!(
         NewTerminalThread,
         /// Starts a new Codex CLI terminal thread.
         NewCodexTerminalThread,
+        /// Starts a new Claude Code CLI terminal thread.
+        NewClaudeTerminalThread,
     ]
 );
 

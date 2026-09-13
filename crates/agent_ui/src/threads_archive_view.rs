@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::agent_connection_store::AgentConnectionStore;
+use crate::claude_thread_history::{ClaudeSession, load_history as load_claude_history};
 use crate::codex_thread_history::{CodexSession, load_history};
 
 use crate::thread_metadata_store::{
@@ -60,6 +61,10 @@ enum ArchiveListItem {
         session: CodexSession,
         highlight_positions: Vec<usize>,
     },
+    ClaudeEntry {
+        session: ClaudeSession,
+        highlight_positions: Vec<usize>,
+    },
     Entry {
         thread: ThreadMetadata,
         highlight_positions: Vec<usize>,
@@ -71,6 +76,7 @@ impl ArchiveListItem {
         match self {
             Self::Entry { thread, .. } => Some(thread.created_at.unwrap_or(thread.updated_at)),
             Self::CodexEntry { session, .. } => Some(session.created_at),
+            Self::ClaudeEntry { session, .. } => Some(session.updated_at),
             Self::BucketSeparator(_) => None,
         }
     }
@@ -152,6 +158,12 @@ pub enum ThreadsArchiveViewEvent {
         working_directory: PathBuf,
         created_at: DateTime<Utc>,
     },
+    ActivateClaude {
+        session_id: uuid::Uuid,
+        title: String,
+        working_directory: PathBuf,
+        updated_at: DateTime<Utc>,
+    },
     CancelRestore {
         thread_id: ThreadId,
     },
@@ -184,6 +196,10 @@ pub struct ThreadsArchiveView {
     codex_history_error: Option<String>,
     loading_codex_history: bool,
     _load_codex_history_task: Task<()>,
+    claude_sessions: Vec<ClaudeSession>,
+    claude_history_error: Option<String>,
+    loading_claude_history: bool,
+    _load_claude_history_task: Task<()>,
 }
 
 impl ThreadsArchiveView {
@@ -262,9 +278,14 @@ impl ThreadsArchiveView {
             codex_history_error: None,
             loading_codex_history: false,
             _load_codex_history_task: Task::ready(()),
+            claude_sessions: Vec::new(),
+            claude_history_error: None,
+            loading_claude_history: false,
+            _load_claude_history_task: Task::ready(()),
         };
 
         this.load_codex_history(cx);
+        this.load_claude_history(cx);
         this.update_items(cx);
         this.reload_branch_names_if_threads_changed(cx);
         this
@@ -332,6 +353,68 @@ impl ThreadsArchiveView {
         });
     }
 
+    fn load_claude_history(&mut self, cx: &mut Context<Self>) {
+        let Ok(project_data) = self.workspace.read_with(cx, |workspace, cx| {
+            let project = workspace.project().read(cx);
+            project.is_local().then(|| {
+                let project_paths = project
+                    .visible_worktrees(cx)
+                    .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+                    .collect::<Vec<_>>();
+                (project_paths, project.environment().clone())
+            })
+        }) else {
+            return;
+        };
+        let Some((project_paths, environment)) =
+            project_data.filter(|(paths, _)| !paths.is_empty())
+        else {
+            return;
+        };
+        let environment =
+            environment.update(cx, |environment, cx| environment.default_environment(cx));
+        self.loading_claude_history = true;
+        self._load_claude_history_task = cx.spawn(async move |this, cx| {
+            let environment = environment.await;
+            let claude_home = environment
+                .as_ref()
+                .and_then(|environment| environment.get("CLAUDE_CONFIG_DIR"))
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("CLAUDE_CONFIG_DIR")
+                        .filter(|path| !path.is_empty())
+                        .map(PathBuf::from)
+                })
+                .unwrap_or_else(|| paths::home_dir().join(".claude"));
+            let result = cx
+                .background_spawn(async move { load_claude_history(&claude_home, &project_paths) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.loading_claude_history = false;
+                match result {
+                    Ok(sessions) => this.claude_sessions = sessions,
+                    Err(error) => {
+                        log::error!("Could not load Claude Code history: {error:#}");
+                        this.claude_history_error =
+                            Some(format!("Could not load Claude Code history: {error}"));
+                    }
+                }
+                this.update_items(cx);
+            })
+            .log_err();
+        });
+    }
+
+    fn activate_claude_session(&mut self, session: ClaudeSession, cx: &mut Context<Self>) {
+        cx.emit(ThreadsArchiveViewEvent::ActivateClaude {
+            session_id: session.id,
+            title: session.title,
+            working_directory: session.working_directory,
+            updated_at: session.updated_at,
+        });
+    }
+
     pub fn has_selection(&self) -> bool {
         self.selection.is_some()
     }
@@ -371,6 +454,7 @@ impl ThreadsArchiveView {
         if self.thread_filter == ThreadFilter::ArchivedOnly
             && store.archived_entries().next().is_none()
             && !self.codex_sessions.iter().any(|session| session.archived)
+            && self.claude_sessions.is_empty()
         {
             self.thread_filter = ThreadFilter::All;
         }
@@ -443,6 +527,29 @@ impl ThreadsArchiveView {
                 continue;
             };
             items.push(ArchiveListItem::CodexEntry {
+                session: session.clone(),
+                highlight_positions,
+            });
+        }
+        for session in &self.claude_sessions {
+            if self.thread_filter == ThreadFilter::ArchivedOnly {
+                continue;
+            }
+            let highlight_positions = if query.is_empty() {
+                Vec::new()
+            } else if let Some(positions) = fuzzy_match_positions(&query, &session.title) {
+                positions
+            } else if session
+                .working_directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| fuzzy_match_positions(&query, name).is_some())
+            {
+                Vec::new()
+            } else {
+                continue;
+            };
+            items.push(ArchiveListItem::ClaudeEntry {
                 session: session.clone(),
                 highlight_positions,
             });
@@ -713,6 +820,9 @@ impl ThreadsArchiveView {
             Some(ArchiveListItem::CodexEntry { session, .. }) => {
                 self.activate_codex_session(session, cx)
             }
+            Some(ArchiveListItem::ClaudeEntry { session, .. }) => {
+                self.activate_claude_session(session, cx)
+            }
             _ => {}
         }
     }
@@ -762,6 +872,30 @@ impl ThreadsArchiveView {
                 }))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.activate_codex_session(session.clone(), cx);
+                }))
+                .into_any_element()
+            }
+            ArchiveListItem::ClaudeEntry {
+                session,
+                highlight_positions,
+            } => {
+                let session = session.clone();
+                ThreadItem::new(
+                    SharedString::from(format!("claude-history-{}", session.id)),
+                    SharedString::from(session.title.clone()),
+                )
+                .icon(IconName::AiClaude)
+                .timestamp(format_history_entry_timestamp(session.updated_at))
+                .highlight_positions(highlight_positions.clone())
+                .project_paths(vec![session.working_directory.clone()].into())
+                .focused(self.selection == Some(ix))
+                .hovered(self.hovered_index == Some(ix))
+                .on_hover(cx.listener(move |this, hovered, _, cx| {
+                    this.hovered_index = if *hovered { Some(ix) } else { None };
+                    cx.notify();
+                }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.activate_claude_session(session.clone(), cx);
                 }))
                 .into_any_element()
             }
@@ -1209,8 +1343,8 @@ impl Render for ThreadsArchiveView {
         let has_query = !self.filter_editor.read(cx).text(cx).is_empty();
 
         let content = if is_empty {
-            let message = if self.loading_codex_history {
-                "Loading Codex CLI history…"
+            let message = if self.loading_codex_history || self.loading_claude_history {
+                "Loading CLI history…"
             } else if has_query {
                 "No threads match your search."
             } else {
@@ -1263,6 +1397,13 @@ impl Render for ThreadsArchiveView {
             .child(self.render_header(window, cx))
             .when(!has_query, |this| this.child(self.render_toolbar(cx)))
             .when_some(self.codex_history_error.clone(), |this, error| {
+                this.child(
+                    Label::new(error)
+                        .size(LabelSize::Small)
+                        .color(Color::Warning),
+                )
+            })
+            .when_some(self.claude_history_error.clone(), |this, error| {
                 this.child(
                     Label::new(error)
                         .size(LabelSize::Small)

@@ -71,13 +71,20 @@ impl TerminalThreadMetadata {
             self.title.as_ref(),
             self.custom_title.as_ref().map(|title| title.as_ref()),
         );
-        if self.agent_cli.as_deref() == Some("codex")
-            && self.custom_title.is_none()
-            && let Some(session_prefix) = self.agent_cli_session_prefix.as_deref()
-        {
-            return codex_thread_display_title(title.as_ref(), session_prefix);
+        if self.custom_title.is_some() {
+            return title;
         }
-        title
+        match self.agent_cli.as_deref() {
+            Some("codex") => {
+                if let Some(session_prefix) = self.agent_cli_session_prefix.as_deref() {
+                    codex_thread_display_title(title.as_ref(), session_prefix)
+                } else {
+                    title
+                }
+            }
+            Some("claude") => claude_thread_display_title(title.as_ref()),
+            _ => title,
+        }
     }
 }
 
@@ -100,6 +107,15 @@ pub(crate) fn codex_thread_display_title(title: &str, session_prefix: &str) -> S
         return SharedString::from("Codex");
     }
     SharedString::from(title.to_string())
+}
+
+/// Claude Code's own window title is always prefixed with a decorative
+/// marker (its idle "✳ " marker, or a busy spinner glyph while working --
+/// see `terminal_agent_status::classify`), which reads as clutter rather
+/// than status once shown as a thread title, so strip it the same way a
+/// spinner prefix is stripped elsewhere.
+pub(crate) fn claude_thread_display_title(title: &str) -> SharedString {
+    SharedString::from(terminal_title_without_prefix(title).to_string())
 }
 
 pub(crate) fn compose_terminal_thread_title(
@@ -791,6 +807,32 @@ mod tests {
             ),
             "Codex"
         );
+    }
+
+    #[test]
+    fn test_claude_thread_display_title_strips_the_decorative_prefix() {
+        // Claude Code's window title is always prefixed with a decorative
+        // marker (its idle "✳" marker, or a busy spinner glyph), which reads
+        // as clutter rather than status once shown as a thread title.
+        assert_eq!(
+            claude_thread_display_title("✳ History of tea").as_ref(),
+            "History of tea"
+        );
+        assert_eq!(
+            claude_thread_display_title("◐ Claude Code").as_ref(),
+            "Claude Code"
+        );
+        assert_eq!(claude_thread_display_title("Claude").as_ref(), "Claude");
+    }
+
+    #[test]
+    fn test_claude_terminal_thread_display_title_strips_the_decorative_prefix() {
+        let mut metadata = metadata(
+            "✳ History of tea",
+            WorktreePaths::from_folder_paths(&PathList::default()),
+        );
+        metadata.agent_cli = Some("claude".to_string());
+        assert_eq!(metadata.display_title().as_ref(), "History of tea");
     }
 
     #[test]

@@ -1465,13 +1465,13 @@ impl Sidebar {
                         worktree_info_from_thread_paths(&metadata.worktree_paths, &branch_by_path);
                     let has_notification =
                         live_notified_terminal_ids.contains(&metadata.terminal_id);
-                    let (active_agent_status, is_codex) = {
+                    let (active_agent_status, active_agent_program) = {
                         let terminal_store = terminal_store.read(cx);
-                        let active_agent_program =
-                            terminal_store.active_agent_program(metadata.terminal_id);
                         (
                             terminal_store.active_agent_status(metadata.terminal_id),
-                            active_agent_program == Some("codex"),
+                            terminal_store
+                                .active_agent_program(metadata.terminal_id)
+                                .map(|program| program.to_string()),
                         )
                     };
                     let (status, icon_color) = match active_agent_status {
@@ -1487,10 +1487,10 @@ impl Sidebar {
                         }
                     };
                     TerminalEntry {
-                        icon: if is_codex {
-                            IconName::AiOpenAi
-                        } else {
-                            IconName::Terminal
+                        icon: match active_agent_program.as_deref() {
+                            Some("codex") => IconName::AiOpenAi,
+                            Some("claude") => IconName::AiClaude,
+                            _ => IconName::Terminal,
                         },
                         icon_color,
                         status,
@@ -7649,6 +7649,50 @@ impl Sidebar {
                         remote_connection: None,
                         working_directory: Some(working_directory.clone()),
                         agent_cli: Some("codex".into()),
+                        agent_cli_session_prefix: Some(session_id),
+                    });
+                    let workspace = this
+                        .find_current_workspace_for_path_list(metadata.folder_paths(), None, cx)
+                        .unwrap_or(workspace);
+                    this.show_thread_list(window, cx);
+                    this.activate_terminal_entry(
+                        metadata,
+                        ThreadEntryWorkspace::Open(workspace),
+                        true,
+                        window,
+                        cx,
+                    );
+                }
+                ThreadsArchiveViewEvent::ActivateClaude {
+                    session_id,
+                    title,
+                    working_directory,
+                    updated_at,
+                } => {
+                    let Some(workspace) = this.active_workspace(cx) else {
+                        return;
+                    };
+                    let session_uuid = *session_id;
+                    let session_id = session_uuid.to_string();
+                    let existing = TerminalThreadMetadataStore::global(cx)
+                        .read(cx)
+                        .entries()
+                        .find(|metadata| {
+                            metadata.remote_connection.is_none()
+                                && metadata.agent_cli.as_deref() == Some("claude")
+                                && metadata.agent_cli_session_prefix.as_deref()
+                                    == Some(session_id.as_str())
+                        })
+                        .cloned();
+                    let metadata = existing.unwrap_or_else(|| TerminalThreadMetadata {
+                        terminal_id: agent_ui::TerminalId::from_session_id(session_uuid),
+                        title: title.clone().into(),
+                        custom_title: Some(title.clone().into()),
+                        created_at: *updated_at,
+                        worktree_paths: workspace.read(cx).project().read(cx).worktree_paths(cx),
+                        remote_connection: None,
+                        working_directory: Some(working_directory.clone()),
+                        agent_cli: Some("claude".into()),
                         agent_cli_session_prefix: Some(session_id),
                     });
                     let workspace = this
