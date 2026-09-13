@@ -79,7 +79,7 @@ For example, if `agent.terminal_init_command` is `prepare-codex`, Pentip writes
 this input to the shell:
 
 ```text
-prepare-codex<CR>codex -c 'tui.terminal_title=["thread-id"]'<CR>
+prepare-codex<CR>codex -c 'tui.terminal_title=["thread-name","thread-id"]'<CR>
 ```
 
 Pentip waits for the terminal startup handshake before it writes this input.
@@ -130,6 +130,17 @@ installed. The test verifies these results:
 The existing sidebar integration test verifies that Agent Panel terminals
 appear in the Threads Sidebar and sidebar search.
 
+## Agent CLI Status {#codex-cli-terminal-threads-status}
+
+Pentip classifies live Codex terminal output without ACP. It checks the recent
+terminal output and terminal title 300 milliseconds after output starts.
+Continuous output does not delay the check. Codex launch and resume commands
+include the runtime status in the terminal title.
+A terminal bell causes an immediate check. The Threads Sidebar shows a running
+indicator while Codex works, a warning when Codex needs user input, a yellow
+Codex icon when a turn finishes, and a muted Codex icon after the user opens the
+finished thread. The row returns to the terminal icon when Codex exits.
+
 ## Boundaries {#codex-cli-terminal-threads-boundaries}
 
 - Codex owns authentication, models, tools, and its configuration files.
@@ -137,7 +148,7 @@ appear in the Threads Sidebar and sidebar search.
   entry.
 - This change does not replace ACP external agents.
 - This change does not import Flint's separate `agent_threads` crate.
-- This change does not scan Codex session history.
+- Codex session history is available for local projects.
 - This change does not add Codex settings to the Settings Editor.
 - This change does not download or update Codex CLI.
 
@@ -148,14 +159,46 @@ prefix with the terminal metadata. When Pentip restores the terminal, it finds
 the matching Codex session record, extracts the full session UUID, and runs
 `codex resume <session-id>`. It does not use `codex resume --last`.
 
+New **Terminal** threads install a shell function for `codex` in POSIX shells,
+Fish, and PowerShell. The function adds the thread ID title setting and passes
+the command arguments to Codex. This lets a manually started Codex session use
+the same resume path. The function does not change global Codex settings.
+Commands that bypass the function, and other shells, must set
+`-c 'tui.terminal_title=["thread-name","thread-id"]'` to publish the session ID.
+
 The session lookup runs in the restored terminal shell. It therefore uses the
 same local, remote, WSL, or PowerShell environment as Codex. If the matching
 session record is missing, the terminal shows an error and does not start a
 different Codex session.
 
+Pentip stops the foreground process and its terminal shell when a terminal thread
+closes. This releases Codex session ownership before a later resume.
+
+Restore keeps the saved display title and session ID prefix. A shell process
+change does not erase the saved agent or session ID. If the saved session ID is
+missing, restore shows an error instead of starting a new Codex session.
+
 The generic new-thread action remembers only that the last entry was a
 terminal. It does not remember that the terminal ran Codex. To start another
 Codex terminal, select **Codex CLI** again.
+
+## Thread History {#codex-cli-terminal-threads-history}
+
+Select **Show Thread History** to see Codex sessions for the current local
+project. This includes sessions started outside Pentip and archived sessions.
+Pentip matches the saved working folder to an open project folder or one of its
+subfolders.
+
+Pentip reads the Codex state database without write access. It also reads session
+files in `sessions` and `archived_sessions`. It uses `CODEX_HOME` from the project
+environment, or `~/.codex` when that variable is not set. Search and time groups
+apply to Codex sessions as well as ACP threads.
+
+Select a Codex session to open it in an Agent Panel terminal with
+`codex resume <session-id>`. Pentip uses the full saved session ID. If the session
+already has a Terminal Thread in Pentip, Pentip opens that terminal.
+
+This history scan does not read sessions on remote or WSL hosts.
 
 ## Future CLI Options {#codex-cli-terminal-threads-future-options}
 

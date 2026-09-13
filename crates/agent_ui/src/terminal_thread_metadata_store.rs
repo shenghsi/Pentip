@@ -67,11 +67,39 @@ impl TerminalThreadMetadata {
     }
 
     pub fn display_title(&self) -> SharedString {
-        compose_terminal_thread_title(
+        let title = compose_terminal_thread_title(
             self.title.as_ref(),
             self.custom_title.as_ref().map(|title| title.as_ref()),
-        )
+        );
+        if self.agent_cli.as_deref() == Some("codex")
+            && self.custom_title.is_none()
+            && let Some(session_prefix) = self.agent_cli_session_prefix.as_deref()
+        {
+            return codex_thread_display_title(title.as_ref(), session_prefix);
+        }
+        title
     }
+}
+
+pub(crate) fn codex_thread_display_title(title: &str, session_prefix: &str) -> SharedString {
+    let title = match title.rsplit_once(" | ") {
+        Some((title, "Starting" | "Working" | "Thinking" | "Waiting" | "Ready")) => title,
+        _ => title,
+    };
+    let matches_session = |value: &str| {
+        value
+            .trim_end_matches(['.', '…'])
+            .starts_with(session_prefix)
+    };
+    if let Some((thread_title, session_id)) = title.rsplit_once(" | ")
+        && matches_session(session_id)
+    {
+        return SharedString::from(thread_title.to_string());
+    }
+    if matches_session(title) {
+        return SharedString::from("Codex");
+    }
+    SharedString::from(title.to_string())
 }
 
 pub(crate) fn compose_terminal_thread_title(
@@ -141,11 +169,20 @@ pub struct TerminalThreadMetadataStore {
     db: TerminalThreadMetadataDb,
     terminals: HashMap<TerminalId, TerminalThreadMetadata>,
     active_agent_programs: HashMap<TerminalId, String>,
+    active_agent_statuses: HashMap<TerminalId, TerminalAgentStatus>,
     terminals_by_paths: HashMap<PathList, HashSet<TerminalId>>,
     terminals_by_main_paths: HashMap<PathList, HashSet<TerminalId>>,
     reload_task: Option<Shared<Task<()>>>,
     pending_terminal_ops_tx: async_channel::Sender<DbOperation>,
     _db_operations_task: Task<()>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalAgentStatus {
+    Running,
+    Blocked,
+    Finished,
+    Idle,
 }
 
 #[derive(Debug, PartialEq)]
@@ -204,6 +241,37 @@ impl TerminalThreadMetadataStore {
         self.active_agent_programs
             .get(&terminal_id)
             .map(String::as_str)
+    }
+
+    pub fn active_agent_status(&self, terminal_id: TerminalId) -> Option<TerminalAgentStatus> {
+        self.active_agent_statuses.get(&terminal_id).copied()
+    }
+
+    pub fn set_active_agent_status(
+        &mut self,
+        terminal_id: TerminalId,
+        status: Option<TerminalAgentStatus>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = match status {
+            Some(status) => self.active_agent_statuses.insert(terminal_id, status) != Some(status),
+            None => self.active_agent_statuses.remove(&terminal_id).is_some(),
+        };
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub fn mark_active_agent_status_seen(
+        &mut self,
+        terminal_id: TerminalId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_agent_statuses.get(&terminal_id) == Some(&TerminalAgentStatus::Finished) {
+            self.active_agent_statuses
+                .insert(terminal_id, TerminalAgentStatus::Idle);
+            cx.notify();
+        }
     }
 
     pub fn set_active_agent_program(
@@ -372,6 +440,7 @@ impl TerminalThreadMetadataStore {
 
     pub fn delete(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
         self.active_agent_programs.remove(&terminal_id);
+        self.active_agent_statuses.remove(&terminal_id);
         if let Some(terminal) = self.terminals.remove(&terminal_id) {
             if let Some(ids) = self.terminals_by_paths.get_mut(terminal.folder_paths()) {
                 ids.remove(&terminal_id);
@@ -419,6 +488,7 @@ impl TerminalThreadMetadataStore {
             db,
             terminals: HashMap::default(),
             active_agent_programs: HashMap::default(),
+            active_agent_statuses: HashMap::default(),
             terminals_by_paths: HashMap::default(),
             terminals_by_main_paths: HashMap::default(),
             reload_task: None,
@@ -456,6 +526,7 @@ impl TerminalThreadMetadataStore {
                 this.update(cx, |this, cx| {
                     this.terminals.clear();
                     this.active_agent_programs.clear();
+                    this.active_agent_statuses.clear();
                     this.terminals_by_paths.clear();
                     this.terminals_by_main_paths.clear();
 
@@ -695,6 +766,31 @@ mod tests {
         assert_eq!(terminal_title_prefix(" Thinking"), None);
         assert_eq!(terminal_title_prefix("✳"), None);
         assert_eq!(terminal_title_prefix("v1 Running"), None);
+    }
+
+    #[test]
+    fn test_codex_thread_display_title_hides_session_id() {
+        assert_eq!(
+            codex_thread_display_title(
+                "Greet user | 01a0982f-4dfd-7f92-a721-81898... | Working",
+                "01a0982f-4dfd-7f92-a721-81898"
+            ),
+            "Greet user"
+        );
+        assert_eq!(
+            codex_thread_display_title(
+                "Greet user | 01a0982f-4dfd-7f92-a721-81898...",
+                "01a0982f-4dfd-7f92-a721-81898",
+            ),
+            "Greet user"
+        );
+        assert_eq!(
+            codex_thread_display_title(
+                "01a0982f-4dfd-7f92-a721-81898...",
+                "01a0982f-4dfd-7f92-a721-81898",
+            ),
+            "Codex"
+        );
     }
 
     #[test]

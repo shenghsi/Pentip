@@ -57,6 +57,17 @@ impl Connection {
         Self::open(uri, true).unwrap_or_else(|_| Self::open_memory(Some(uri)))
     }
 
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let connection = Self::open_with_flags(
+            path.to_str()
+                .ok_or_else(|| anyhow::anyhow!("Database path is not UTF-8"))?,
+            true,
+            SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
+        )?;
+        *connection.write.borrow_mut() = false;
+        Ok(connection)
+    }
+
     pub fn open_memory(uri: Option<&str>) -> Self {
         if let Some(uri) = uri {
             let in_memory_path = format!("file:{}?mode=memory&cache=shared", uri);

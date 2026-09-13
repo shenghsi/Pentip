@@ -1,4 +1,4 @@
-use crate::{CommonAnimationExt, DiffStat, GradientFade, HighlightedLabel, Tooltip, prelude::*};
+use crate::{DiffStat, GradientFade, HighlightedLabel, SpinnerLabel, Tooltip, prelude::*};
 
 use gpui::{
     Animation, AnimationExt, ClickEvent, Hsla, MouseButton, SharedString,
@@ -340,10 +340,9 @@ impl RenderOnce for ThreadItem {
         let icon = if self.status == AgentThreadStatus::Running {
             icon_container()
                 .child(
-                    Icon::new(IconName::LoadCircle)
-                        .size(IconSize::Small)
-                        .color(Color::Muted)
-                        .with_rotate_animation(2),
+                    SpinnerLabel::new()
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
                 )
                 .into_any_element()
         } else if let Some(status_icon) = status_icon {

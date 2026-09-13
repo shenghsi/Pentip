@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::agent_connection_store::AgentConnectionStore;
+use crate::codex_thread_history::{CodexSession, load_history};
 
 use crate::thread_metadata_store::{
     ThreadId, ThreadMetadata, ThreadMetadataStore, worktree_info_from_thread_paths,
@@ -22,7 +23,6 @@ use gpui::{
     Focusable, ListState, Render, SharedString, Subscription, Task, TaskExt, WeakEntity, Window,
     list, prelude::*, px,
 };
-use itertools::Itertools as _;
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use picker::{
     Picker, PickerDelegate,
@@ -56,10 +56,24 @@ enum ThreadFilter {
 #[derive(Clone)]
 enum ArchiveListItem {
     BucketSeparator(TimeBucket),
+    CodexEntry {
+        session: CodexSession,
+        highlight_positions: Vec<usize>,
+    },
     Entry {
         thread: ThreadMetadata,
         highlight_positions: Vec<usize>,
     },
+}
+
+impl ArchiveListItem {
+    fn created_at(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Entry { thread, .. } => Some(thread.created_at.unwrap_or(thread.updated_at)),
+            Self::CodexEntry { session, .. } => Some(session.created_at),
+            Self::BucketSeparator(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,8 +143,18 @@ pub fn fuzzy_match_positions(query: &str, candidate: &str) -> Option<Vec<usize>>
 
 pub enum ThreadsArchiveViewEvent {
     Close,
-    Activate { thread: ThreadMetadata },
-    CancelRestore { thread_id: ThreadId },
+    Activate {
+        thread: ThreadMetadata,
+    },
+    ActivateCodex {
+        session_id: uuid::Uuid,
+        title: String,
+        working_directory: PathBuf,
+        created_at: DateTime<Utc>,
+    },
+    CancelRestore {
+        thread_id: ThreadId,
+    },
     Import,
     NewThread,
 }
@@ -156,6 +180,10 @@ pub struct ThreadsArchiveView {
     archived_branch_names: HashMap<ThreadId, HashMap<PathBuf, String>>,
     _load_branch_names_task: Task<()>,
     thread_filter: ThreadFilter,
+    codex_sessions: Vec<CodexSession>,
+    codex_history_error: Option<String>,
+    loading_codex_history: bool,
+    _load_codex_history_task: Task<()>,
 }
 
 impl ThreadsArchiveView {
@@ -230,11 +258,78 @@ impl ThreadsArchiveView {
             archived_branch_names: HashMap::default(),
             _load_branch_names_task: Task::ready(()),
             thread_filter: ThreadFilter::All,
+            codex_sessions: Vec::new(),
+            codex_history_error: None,
+            loading_codex_history: false,
+            _load_codex_history_task: Task::ready(()),
         };
 
+        this.load_codex_history(cx);
         this.update_items(cx);
         this.reload_branch_names_if_threads_changed(cx);
         this
+    }
+
+    fn load_codex_history(&mut self, cx: &mut Context<Self>) {
+        let Ok(project_data) = self.workspace.read_with(cx, |workspace, cx| {
+            let project = workspace.project().read(cx);
+            project.is_local().then(|| {
+                let project_paths = project
+                    .visible_worktrees(cx)
+                    .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+                    .collect::<Vec<_>>();
+                (project_paths, project.environment().clone())
+            })
+        }) else {
+            return;
+        };
+        let Some((project_paths, environment)) =
+            project_data.filter(|(paths, _)| !paths.is_empty())
+        else {
+            return;
+        };
+        let environment =
+            environment.update(cx, |environment, cx| environment.default_environment(cx));
+        self.loading_codex_history = true;
+        self._load_codex_history_task = cx.spawn(async move |this, cx| {
+            let environment = environment.await;
+            let codex_home = environment
+                .as_ref()
+                .and_then(|environment| environment.get("CODEX_HOME"))
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("CODEX_HOME")
+                        .filter(|path| !path.is_empty())
+                        .map(PathBuf::from)
+                })
+                .unwrap_or_else(|| paths::home_dir().join(".codex"));
+            let result = cx
+                .background_spawn(async move { load_history(&codex_home, &project_paths) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.loading_codex_history = false;
+                match result {
+                    Ok(sessions) => this.codex_sessions = sessions,
+                    Err(error) => {
+                        log::error!("Could not load Codex CLI history: {error:#}");
+                        this.codex_history_error =
+                            Some(format!("Could not load Codex CLI history: {error}"));
+                    }
+                }
+                this.update_items(cx);
+            })
+            .log_err();
+        });
+    }
+
+    fn activate_codex_session(&mut self, session: CodexSession, cx: &mut Context<Self>) {
+        cx.emit(ThreadsArchiveViewEvent::ActivateCodex {
+            session_id: session.id,
+            title: session.title,
+            working_directory: session.working_directory,
+            created_at: session.created_at,
+        });
     }
 
     pub fn has_selection(&self) -> bool {
@@ -275,6 +370,7 @@ impl ThreadsArchiveView {
         // so they aren't stranded with an empty list and a disabled toggle.
         if self.thread_filter == ThreadFilter::ArchivedOnly
             && store.archived_entries().next().is_none()
+            && !self.codex_sessions.iter().any(|session| session.archived)
         {
             self.thread_filter = ThreadFilter::All;
         }
@@ -286,8 +382,6 @@ impl ThreadsArchiveView {
                 ThreadFilter::All => true,
                 ThreadFilter::ArchivedOnly => t.archived,
             })
-            .sorted_by_cached_key(|t| t.created_at.unwrap_or(t.updated_at))
-            .rev()
             .cloned()
             .collect::<Vec<_>>();
 
@@ -295,7 +389,6 @@ impl ThreadsArchiveView {
         let today = Local::now().naive_local().date();
 
         let mut items = Vec::with_capacity(sessions.len() + 5);
-        let mut current_bucket: Option<TimeBucket> = None;
 
         for session in sessions {
             let highlight_positions = if !query.is_empty() {
@@ -325,26 +418,51 @@ impl ThreadsArchiveView {
                 Vec::new()
             };
 
-            let entry_bucket = {
-                let entry_date = session
-                    .created_at
-                    .unwrap_or(session.updated_at)
-                    .with_timezone(&Local)
-                    .naive_local()
-                    .date();
-                TimeBucket::from_dates(today, entry_date)
-            };
-
-            if Some(entry_bucket) != current_bucket {
-                current_bucket = Some(entry_bucket);
-                items.push(ArchiveListItem::BucketSeparator(entry_bucket));
-            }
-
             items.push(ArchiveListItem::Entry {
                 thread: session,
                 highlight_positions,
             });
         }
+
+        for session in &self.codex_sessions {
+            if self.thread_filter == ThreadFilter::ArchivedOnly && !session.archived {
+                continue;
+            }
+            let highlight_positions = if query.is_empty() {
+                Vec::new()
+            } else if let Some(positions) = fuzzy_match_positions(&query, &session.title) {
+                positions
+            } else if session
+                .working_directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| fuzzy_match_positions(&query, name).is_some())
+            {
+                Vec::new()
+            } else {
+                continue;
+            };
+            items.push(ArchiveListItem::CodexEntry {
+                session: session.clone(),
+                highlight_positions,
+            });
+        }
+        items.sort_by_cached_key(|item| std::cmp::Reverse(item.created_at()));
+        let mut bucketed_items = Vec::with_capacity(items.len() + 5);
+        let mut current_bucket = None;
+        for item in items {
+            let Some(created_at) = item.created_at() else {
+                continue;
+            };
+            let bucket =
+                TimeBucket::from_dates(today, created_at.with_timezone(&Local).date_naive());
+            if current_bucket != Some(bucket) {
+                bucketed_items.push(ArchiveListItem::BucketSeparator(bucket));
+                current_bucket = Some(bucket);
+            }
+            bucketed_items.push(item);
+        }
+        let items = bucketed_items;
 
         let preserve = self.preserve_selection_on_next_update;
         self.preserve_selection_on_next_update = false;
@@ -386,6 +504,7 @@ impl ThreadsArchiveView {
             .iter()
             .filter_map(|item| match item {
                 ArchiveListItem::Entry { thread, .. } => Some(thread.thread_id),
+                ArchiveListItem::CodexEntry { .. } => None,
                 _ => None,
             })
             .collect();
@@ -502,7 +621,10 @@ impl ThreadsArchiveView {
     }
 
     fn is_selectable_item(&self, ix: usize) -> bool {
-        matches!(self.items.get(ix), Some(ArchiveListItem::Entry { .. }))
+        matches!(
+            self.items.get(ix),
+            Some(ArchiveListItem::Entry { .. } | ArchiveListItem::CodexEntry { .. })
+        )
     }
 
     fn find_next_selectable(&self, start: usize) -> Option<usize> {
@@ -584,11 +706,15 @@ impl ThreadsArchiveView {
 
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.selection else { return };
-        let Some(ArchiveListItem::Entry { thread, .. }) = self.items.get(ix) else {
-            return;
-        };
-
-        self.unarchive_thread(thread.clone(), window, cx);
+        match self.items.get(ix).cloned() {
+            Some(ArchiveListItem::Entry { thread, .. }) => {
+                self.unarchive_thread(thread, window, cx)
+            }
+            Some(ArchiveListItem::CodexEntry { session, .. }) => {
+                self.activate_codex_session(session, cx)
+            }
+            _ => {}
+        }
     }
 
     fn render_list_entry(
@@ -613,6 +739,32 @@ impl ThreadsArchiveView {
                         .color(Color::Muted),
                 )
                 .into_any_element(),
+            ArchiveListItem::CodexEntry {
+                session,
+                highlight_positions,
+            } => {
+                let session = session.clone();
+                let archived = session.archived;
+                ThreadItem::new(
+                    SharedString::from(format!("codex-history-{}", session.id)),
+                    SharedString::from(session.title.clone()),
+                )
+                .icon(IconName::AiOpenAi)
+                .archived(archived)
+                .timestamp(format_history_entry_timestamp(session.created_at))
+                .highlight_positions(highlight_positions.clone())
+                .project_paths(vec![session.working_directory.clone()].into())
+                .focused(self.selection == Some(ix))
+                .hovered(self.hovered_index == Some(ix))
+                .on_hover(cx.listener(move |this, hovered, _, cx| {
+                    this.hovered_index = if *hovered { Some(ix) } else { None };
+                    cx.notify();
+                }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.activate_codex_session(session.clone(), cx);
+                }))
+                .into_any_element()
+            }
             ArchiveListItem::Entry {
                 thread,
                 highlight_positions,
@@ -944,12 +1096,18 @@ impl ThreadsArchiveView {
         let entry_count = self
             .items
             .iter()
-            .filter(|item| matches!(item, ArchiveListItem::Entry { .. }))
+            .filter(|item| {
+                matches!(
+                    item,
+                    ArchiveListItem::Entry { .. } | ArchiveListItem::CodexEntry { .. }
+                )
+            })
             .count();
 
         let has_archived_threads = {
             let store = ThreadMetadataStore::global(cx).read(cx);
             store.archived_entries().next().is_some()
+                || self.codex_sessions.iter().any(|session| session.archived)
         };
 
         let count_label = if entry_count == 1 {
@@ -1051,7 +1209,9 @@ impl Render for ThreadsArchiveView {
         let has_query = !self.filter_editor.read(cx).text(cx).is_empty();
 
         let content = if is_empty {
-            let message = if has_query {
+            let message = if self.loading_codex_history {
+                "Loading Codex CLI history…"
+            } else if has_query {
                 "No threads match your search."
             } else {
                 "No threads yet."
@@ -1102,6 +1262,13 @@ impl Render for ThreadsArchiveView {
             .size_full()
             .child(self.render_header(window, cx))
             .when(!has_query, |this| this.child(self.render_toolbar(cx)))
+            .when_some(self.codex_history_error.clone(), |this, error| {
+                this.child(
+                    Label::new(error)
+                        .size(LabelSize::Small)
+                        .color(Color::Warning),
+                )
+            })
             .child(content)
     }
 }

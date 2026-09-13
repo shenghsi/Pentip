@@ -1809,6 +1809,72 @@ async fn test_agent_panel_terminals_appear_in_sidebar_and_search(cx: &mut TestAp
         );
     });
 
+    cx.update(|_, cx| {
+        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.set_active_agent_program(terminal_id, Some("codex".to_string()), cx);
+            store.set_active_agent_status(terminal_id, Some(TerminalAgentStatus::Running), cx);
+        });
+    });
+    cx.run_until_parked();
+    sidebar.read_with(cx, |sidebar, _cx| {
+        let terminal = sidebar
+            .contents
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                ListEntry::Terminal(terminal) if terminal.metadata.terminal_id == terminal_id => {
+                    Some(terminal)
+                }
+                _ => None,
+            })
+            .expect("running Codex terminal should be visible");
+        assert_eq!(terminal.icon, IconName::AiOpenAi);
+        assert_eq!(terminal.status, AgentThreadStatus::Running);
+    });
+
+    cx.update(|_, cx| {
+        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.set_active_agent_status(terminal_id, Some(TerminalAgentStatus::Blocked), cx);
+        });
+    });
+    cx.run_until_parked();
+    sidebar.read_with(cx, |sidebar, _cx| {
+        let terminal = sidebar
+            .contents
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                ListEntry::Terminal(terminal) if terminal.metadata.terminal_id == terminal_id => {
+                    Some(terminal)
+                }
+                _ => None,
+            })
+            .expect("blocked Codex terminal should be visible");
+        assert_eq!(terminal.status, AgentThreadStatus::WaitingForConfirmation);
+    });
+
+    cx.update(|_, cx| {
+        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.set_active_agent_status(terminal_id, Some(TerminalAgentStatus::Finished), cx);
+        });
+    });
+    cx.run_until_parked();
+    sidebar.read_with(cx, |sidebar, _cx| {
+        let terminal = sidebar
+            .contents
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                ListEntry::Terminal(terminal) if terminal.metadata.terminal_id == terminal_id => {
+                    Some(terminal)
+                }
+                _ => None,
+            })
+            .expect("finished Codex terminal should be visible");
+        assert_eq!(terminal.status, AgentThreadStatus::Completed);
+        assert_eq!(terminal.icon_color, Some(Color::Warning));
+    });
+
     type_in_search(&sidebar, "server", cx);
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
