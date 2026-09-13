@@ -2809,6 +2809,10 @@ impl Terminal {
         }
     }
 
+    pub fn shell_kind(&self) -> ShellKind {
+        self.template.shell.shell_kind(self.path_style.is_windows())
+    }
+
     /// Normalizes the command name of the foreground process, if one is known.
     pub fn foreground_process_command_name(&self) -> Option<String> {
         match &self.terminal_type {
@@ -2938,6 +2942,20 @@ impl Terminal {
                         .unwrap_or_else(|| "Terminal".to_string()),
                     TerminalType::DisplayOnly => "Terminal".to_string(),
                 }),
+        }
+    }
+
+    pub fn terminate_processes(&self) {
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => {
+                info.kill_current_process();
+                info.kill_child_process();
+            }
+            TerminalType::DisplayOnly => {
+                if let Some(subprocess) = &self.subprocess {
+                    subprocess.kill();
+                }
+            }
         }
     }
 

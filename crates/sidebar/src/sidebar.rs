@@ -6,7 +6,7 @@ use agent::{ThreadStore, ZED_AGENT_ID};
 use agent_client_protocol::schema::v1 as acp;
 use agent_settings::AgentSettings;
 use agent_ui::terminal_thread_metadata_store::{
-    TerminalThreadMetadata, TerminalThreadMetadataStore, terminal_title_prefix,
+    TerminalAgentStatus, TerminalThreadMetadata, TerminalThreadMetadataStore, terminal_title_prefix,
 };
 use agent_ui::thread_metadata_store::{
     ThreadMetadata, ThreadMetadataStore, WorktreePaths, worktree_info_from_thread_paths,
@@ -364,6 +364,9 @@ struct ThreadEntry {
 #[derive(Clone)]
 struct TerminalEntry {
     metadata: TerminalThreadMetadata,
+    icon: IconName,
+    icon_color: Option<Color>,
+    status: AgentThreadStatus,
     workspace: ThreadEntryWorkspace,
     worktrees: Vec<ThreadItemWorktreeInfo>,
     has_notification: bool,
@@ -1455,13 +1458,42 @@ impl Sidebar {
             };
             let linked_worktree_path_lists =
                 linked_worktree_path_lists_for_workspaces(group_workspaces, cx);
+            let terminal_store = TerminalThreadMetadataStore::global(cx);
             let make_terminal_entry =
                 |metadata: TerminalThreadMetadata, workspace: ThreadEntryWorkspace| {
                     let worktrees =
                         worktree_info_from_thread_paths(&metadata.worktree_paths, &branch_by_path);
                     let has_notification =
                         live_notified_terminal_ids.contains(&metadata.terminal_id);
+                    let (active_agent_status, is_codex) = {
+                        let terminal_store = terminal_store.read(cx);
+                        let active_agent_program =
+                            terminal_store.active_agent_program(metadata.terminal_id);
+                        (
+                            terminal_store.active_agent_status(metadata.terminal_id),
+                            active_agent_program == Some("codex"),
+                        )
+                    };
+                    let (status, icon_color) = match active_agent_status {
+                        Some(TerminalAgentStatus::Running) => (AgentThreadStatus::Running, None),
+                        Some(TerminalAgentStatus::Blocked) => {
+                            (AgentThreadStatus::WaitingForConfirmation, None)
+                        }
+                        Some(TerminalAgentStatus::Finished) => {
+                            (AgentThreadStatus::Completed, Some(Color::Warning))
+                        }
+                        Some(TerminalAgentStatus::Idle) | None => {
+                            (AgentThreadStatus::Completed, None)
+                        }
+                    };
                     TerminalEntry {
+                        icon: if is_codex {
+                            IconName::AiOpenAi
+                        } else {
+                            IconName::Terminal
+                        },
+                        icon_color,
+                        status,
                         metadata,
                         workspace,
                         worktrees,
@@ -1471,7 +1503,6 @@ impl Sidebar {
                 };
 
             let mut terminals = Vec::new();
-            let terminal_store = TerminalThreadMetadataStore::global(cx);
             let group_host = group_key.host();
             let mut push_terminal_metadata =
                 |metadata: TerminalThreadMetadata, workspace: ThreadEntryWorkspace| {
@@ -5830,6 +5861,9 @@ impl Sidebar {
                     let timestamp: SharedString =
                         format_history_entry_timestamp(terminal.metadata.created_at).into();
                     Some(ThreadSwitcherEntry::Terminal(ThreadSwitcherTerminalEntry {
+                        icon: terminal.icon,
+                        icon_color: terminal.icon_color,
+                        status: terminal.status,
                         metadata: terminal.metadata.clone(),
                         workspace: terminal.workspace.clone(),
                         project_name: current_header_label.clone(),
@@ -6499,7 +6533,9 @@ impl Sidebar {
 
         ThreadItem::new(id, title)
             .base_bg(sidebar_bg)
-            .icon(IconName::Terminal)
+            .icon(terminal.icon)
+            .when_some(terminal.icon_color, |this, color| this.icon_color(color))
+            .status(terminal.status)
             .when_some(icon_char, |this, icon_char| this.icon_char(icon_char))
             .is_remote(is_remote)
             .worktrees(worktrees)
@@ -7580,6 +7616,52 @@ impl Sidebar {
                 }
                 ThreadsArchiveViewEvent::Activate { thread } => {
                     this.open_thread_from_archive(thread.clone(), window, cx);
+                }
+                ThreadsArchiveViewEvent::ActivateCodex {
+                    session_id,
+                    title,
+                    working_directory,
+                    created_at,
+                } => {
+                    let Some(workspace) = this.active_workspace(cx) else {
+                        return;
+                    };
+                    let session_uuid = *session_id;
+                    let session_id = session_uuid.to_string();
+                    let existing = TerminalThreadMetadataStore::global(cx)
+                        .read(cx)
+                        .entries()
+                        .find(|metadata| {
+                            metadata.remote_connection.is_none()
+                                && metadata.agent_cli.as_deref() == Some("codex")
+                                && metadata
+                                    .agent_cli_session_prefix
+                                    .as_deref()
+                                    .is_some_and(|prefix| session_id.starts_with(prefix))
+                        })
+                        .cloned();
+                    let metadata = existing.unwrap_or_else(|| TerminalThreadMetadata {
+                        terminal_id: agent_ui::TerminalId::from_session_id(session_uuid),
+                        title: title.clone().into(),
+                        custom_title: Some(title.clone().into()),
+                        created_at: *created_at,
+                        worktree_paths: workspace.read(cx).project().read(cx).worktree_paths(cx),
+                        remote_connection: None,
+                        working_directory: Some(working_directory.clone()),
+                        agent_cli: Some("codex".into()),
+                        agent_cli_session_prefix: Some(session_id),
+                    });
+                    let workspace = this
+                        .find_current_workspace_for_path_list(metadata.folder_paths(), None, cx)
+                        .unwrap_or(workspace);
+                    this.show_thread_list(window, cx);
+                    this.activate_terminal_entry(
+                        metadata,
+                        ThreadEntryWorkspace::Open(workspace),
+                        true,
+                        window,
+                        cx,
+                    );
                 }
                 ThreadsArchiveViewEvent::CancelRestore { thread_id } => {
                     this.restoring_tasks.remove(thread_id);
