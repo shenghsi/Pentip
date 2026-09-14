@@ -10328,7 +10328,11 @@ mod tests {
             .update(&mut cx, |terminal, _| terminal.take_input_log());
         let command =
             String::from_utf8(input.into_iter().flatten().collect()).expect("UTF-8 command");
-        assert!(command.contains("resume \"$session_id\""));
+        if PathStyle::local().is_windows() {
+            assert!(command.contains("resume $sessionId"));
+        } else {
+            assert!(command.contains("resume \"$session_id\""));
+        }
         assert!(command.contains("*01a0960e-db2e-7082-b09d-cc25e*.jsonl"));
     }
 
@@ -10386,7 +10390,11 @@ mod tests {
         assert_eq!(input_log.len(), 1);
         let command = String::from_utf8(input_log[0].clone()).expect("command should be UTF-8");
         assert!(command.contains("*01a0960e-db2e-7082-b09d-cc25e*.jsonl"));
-        assert!(command.contains("resume \"$session_id\""));
+        if PathStyle::local().is_windows() {
+            assert!(command.contains("resume $sessionId"));
+        } else {
+            assert!(command.contains("resume \"$session_id\""));
+        }
         panel.update_in(&mut cx, |panel, _, cx| {
             let terminal = panel
                 .terminals
