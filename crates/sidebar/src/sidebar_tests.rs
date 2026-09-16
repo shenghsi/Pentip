@@ -1809,6 +1809,35 @@ async fn test_agent_panel_terminals_appear_in_sidebar_and_search(cx: &mut TestAp
         );
     });
 
+    for (agent_cli, expected_icon) in [
+        ("codex", IconName::AiOpenAi),
+        ("claude", IconName::AiClaude),
+    ] {
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                let mut metadata = store.entry(terminal_id).expect("terminal metadata").clone();
+                metadata.agent_cli = Some(agent_cli.to_string());
+                store.save(metadata, cx);
+                store.set_active_agent_program(terminal_id, Some("pwsh".to_string()), cx);
+            });
+        });
+        cx.run_until_parked();
+        sidebar.read_with(cx, |sidebar, _cx| {
+            let terminal = sidebar
+                .contents
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    ListEntry::Terminal(terminal) if terminal.metadata.terminal_id == terminal_id => {
+                        Some(terminal)
+                    }
+                    _ => None,
+                })
+                .expect("agent terminal should be visible");
+            assert_eq!(terminal.icon, expected_icon);
+        });
+    }
+
     cx.update(|_, cx| {
         TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
             store.set_active_agent_program(terminal_id, Some("codex".to_string()), cx);

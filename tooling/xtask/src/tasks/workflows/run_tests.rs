@@ -671,10 +671,11 @@ fn run_platform_tests_impl(
                 steps::install_linux_dependencies,
             )
             .add_step(steps::setup_node())
-            .when(
-                platform == Platform::Linux || platform == Platform::Mac,
-                |job| job.add_step(steps::cargo_install_nextest()),
-            )
+            // Zed's self-hosted Windows box has nextest baked into its image,
+            // so upstream skips this step for Windows; this fork's swapped-in
+            // windows-latest runner (see release.rs::on_standard_runner) does
+            // not, so it must be installed on every platform here.
+            .add_step(steps::cargo_install_nextest())
             .add_step(steps::clear_target_dir_if_large(platform))
             .add_step(steps::setup_sccache(platform))
             .when(filter_packages, |job| {
