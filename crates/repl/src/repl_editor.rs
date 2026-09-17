@@ -684,6 +684,7 @@ mod tests {
     use gpui::App;
     use indoc::indoc;
     use language::{Buffer, Language, LanguageConfig, LanguageRegistry};
+    use std::time::Duration;
 
     #[gpui::test]
     fn test_snippet_ranges(cx: &mut App) {
@@ -904,6 +905,10 @@ mod tests {
                 cx,
             );
             buffer.set_language_registry(language_registry.clone());
+            // The default test timeout (10ms) can be too short to synchronously
+            // parse markdown plus its injected languages on a loaded CI runner,
+            // which falls back to a background parse this non-async test never awaits.
+            buffer.set_sync_parse_timeout(Some(Duration::from_secs(5)));
             buffer.set_language(Some(markdown.clone()), cx);
             buffer
         });
