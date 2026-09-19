@@ -333,6 +333,10 @@ actions!(
         NewCodexTerminalThread,
         /// Starts a new Claude Code CLI terminal thread.
         NewClaudeTerminalThread,
+        /// Starts a new Pi CLI terminal thread.
+        NewPiTerminalThread,
+        /// Starts a new Antigravity CLI terminal thread.
+        NewAgyTerminalThread,
     ]
 );
 

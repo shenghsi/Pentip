@@ -52,10 +52,10 @@ use crate::{
 };
 use crate::{
     AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
-    NewClaudeTerminalThread, NewCodexTerminalThread, NewTerminalThread, NewThread,
-    OpenActiveThreadAsMarkdown, OpenAgentDiff, ResetFastModeWarnings, ResetTrialEndUpsell,
-    ResetTrialUpsell, ShowAllSidebarThreadMetadata, ShowThreadMetadata, ToggleNewThreadMenu,
-    ToggleOptionsMenu,
+    NewAgyTerminalThread, NewClaudeTerminalThread, NewCodexTerminalThread, NewPiTerminalThread,
+    NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, ResetFastModeWarnings,
+    ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata, ShowThreadMetadata,
+    ToggleNewThreadMenu, ToggleOptionsMenu,
     conversation_view::{
         AcpThreadViewEvent, RootThreadUpdated, ThreadView, reset_fast_mode_warnings,
     },
@@ -161,6 +161,22 @@ fn codex_session_prefix(title: &str) -> Option<String> {
                 .all(|character| character.is_ascii_hexdigit() || character == '-'))
         .then(|| prefix.to_string())
     })
+}
+
+/// Scans for agy's own "Resume with -c (or command below): agy
+/// --conversation=<id>" hint, which it prints to the terminal's normal
+/// scrollback when an interactive session ends. Verified against the real
+/// CLI (agy 1.2.7): this is the only way to learn a fresh agy conversation's
+/// id, since -- unlike Claude/Pi -- `agy --conversation <id>` can't be used
+/// to assign an id at start; an id that doesn't already exist silently gets
+/// a different, agy-chosen conversation instead. `rsplit_once` picks the
+/// most recent hint if more than one is still in the scrollback window.
+fn agy_conversation_id_from_screen(screen_tail: &str) -> Option<String> {
+    let (_, after) = screen_tail.rsplit_once("--conversation")?;
+    let after = after.strip_prefix('=').or_else(|| after.strip_prefix(' '))?;
+    let token = after.split_whitespace().next()?;
+    uuid::Uuid::parse_str(token).ok()?;
+    Some(token.to_string())
 }
 
 /// Maximum number of idle threads kept in the agent panel's retained list.
@@ -429,6 +445,32 @@ pub fn init(cx: &mut App) {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         panel.update(cx, |panel, cx| {
                             panel.new_claude_terminal(
+                                Some(workspace),
+                                AgentThreadSource::AgentPanel,
+                                window,
+                                cx,
+                            )
+                        });
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    }
+                })
+                .register_action(|workspace, _: &NewPiTerminalThread, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            panel.new_pi_terminal(
+                                Some(workspace),
+                                AgentThreadSource::AgentPanel,
+                                window,
+                                cx,
+                            )
+                        });
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    }
+                })
+                .register_action(|workspace, _: &NewAgyTerminalThread, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            panel.new_agy_terminal(
                                 Some(workspace),
                                 AgentThreadSource::AgentPanel,
                                 window,
@@ -1131,8 +1173,8 @@ impl AgentTerminal {
 
     fn refresh_metadata(&mut self, cx: &mut App) -> bool {
         let title_changed = self.refresh_title(cx);
-        let session_prefix_changed =
-            if self.agent_cli.is_none() || self.agent_cli.as_deref() == Some("codex") {
+        let session_prefix_changed = match self.agent_cli.as_deref() {
+            None | Some("codex") => {
                 let terminal_title = self.current_terminal_title(cx);
                 if let Some(prefix) = codex_session_prefix(terminal_title.as_ref())
                     && self.agent_cli_session_prefix.as_ref() != Some(&prefix)
@@ -1143,9 +1185,26 @@ impl AgentTerminal {
                 } else {
                     false
                 }
-            } else {
-                false
-            };
+            }
+            Some("agy") => {
+                let screen_tail = self
+                    .view
+                    .read(cx)
+                    .terminal()
+                    .read(cx)
+                    .last_n_non_empty_lines(60)
+                    .join("\n");
+                if let Some(conversation_id) = agy_conversation_id_from_screen(&screen_tail)
+                    && self.agent_cli_session_prefix.as_deref() != Some(conversation_id.as_str())
+                {
+                    self.agent_cli_session_prefix = Some(conversation_id);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
         let current_working_directory = self.view.read(cx).terminal().read(cx).working_directory();
         let working_directory_changed = current_working_directory
             .as_ref()
@@ -2131,6 +2190,36 @@ impl AgentPanel {
         self.spawn_agent_cli_terminal(working_directory, "Claude", "claude", source, window, cx);
     }
 
+    pub fn new_pi_terminal(
+        &mut self,
+        workspace: Option<&Workspace>,
+        source: AgentThreadSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.supports_terminal(cx) {
+            return;
+        }
+        self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Terminal, cx);
+        let working_directory = self.terminal_working_directory(workspace, cx);
+        self.spawn_agent_cli_terminal(working_directory, "Pi", "pi", source, window, cx);
+    }
+
+    pub fn new_agy_terminal(
+        &mut self,
+        workspace: Option<&Workspace>,
+        source: AgentThreadSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.supports_terminal(cx) {
+            return;
+        }
+        self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Terminal, cx);
+        let working_directory = self.terminal_working_directory(workspace, cx);
+        self.spawn_agent_cli_terminal(working_directory, "Antigravity", "agy", source, window, cx);
+    }
+
     #[cfg(not(test))]
     fn spawn_agent_cli_terminal(
         &mut self,
@@ -2143,7 +2232,7 @@ impl AgentPanel {
     ) {
         let terminal_id = TerminalId::new();
         let startup_command = Self::agent_cli_start_command(command, Some(terminal_id));
-        let session_id = (command == "claude").then(|| terminal_id.to_key_string());
+        let session_id = matches!(command, "claude" | "pi").then(|| terminal_id.to_key_string());
         self.spawn_terminal(
             terminal_id,
             working_directory,
@@ -2173,7 +2262,7 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         let terminal_id = TerminalId::new();
-        let session_id = (command == "claude").then(|| terminal_id.to_key_string());
+        let session_id = matches!(command, "claude" | "pi").then(|| terminal_id.to_key_string());
         let startup_commands = Self::terminal_startup_commands(
             true,
             Some(Self::agent_cli_start_command(command, Some(terminal_id))),
@@ -2371,13 +2460,13 @@ impl AgentPanel {
         let session_id = terminal_id.to_key_string();
         match shell_kind {
             task::ShellKind::Posix => Some(format!(
-                "codex() {{ command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' \"$@\"; }}; claude() {{ case \" $* \" in *\" --resume \"*|*\" --resume=\"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*|*\" --session-id \"*|*\" --session-id=\"*) command claude \"$@\";; *) command claude --session-id {session_id} \"$@\";; esac; }}"
+                "codex() {{ command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' \"$@\"; }}; claude() {{ case \" $* \" in *\" --resume \"*|*\" --resume=\"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*|*\" --session-id \"*|*\" --session-id=\"*) command claude \"$@\";; *) command claude --session-id {session_id} \"$@\";; esac; }}; pi() {{ case \" $* \" in *\" --resume \"*|*\" --resume=\"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*|*\" --session \"*|*\" --session=\"*|*\" --session-id \"*|*\" --session-id=\"*) command pi \"$@\";; *) command pi --session-id {session_id} \"$@\";; esac; }}"
             )),
             task::ShellKind::Fish => Some(format!(
-                "function codex; command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' $argv; end; function claude; if contains -- --resume $argv; or contains -- -r $argv; or contains -- --continue $argv; or contains -- -c $argv; or contains -- --session-id $argv; command claude $argv; else; command claude --session-id {session_id} $argv; end; end"
+                "function codex; command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' $argv; end; function claude; if contains -- --resume $argv; or contains -- -r $argv; or contains -- --continue $argv; or contains -- -c $argv; or contains -- --session-id $argv; command claude $argv; else; command claude --session-id {session_id} $argv; end; end; function pi; if contains -- --resume $argv; or contains -- -r $argv; or contains -- --continue $argv; or contains -- -c $argv; or contains -- --session $argv; or contains -- --session-id $argv; command pi $argv; else; command pi --session-id {session_id} $argv; end; end"
             )),
             task::ShellKind::PowerShell | task::ShellKind::Pwsh => Some(format!(
-                "function codex {{ & (Get-Command codex -CommandType Application -ErrorAction Stop) -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' @args }}; function claude {{ $claudeArgs = $args; $hasSessionArgument = $claudeArgs | Where-Object {{ $_ -in @('--resume', '-r', '--continue', '-c', '--session-id') -or $_ -like '--resume=*' -or $_ -like '--session-id=*' }}; if ($hasSessionArgument) {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) @claudeArgs }} else {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) --session-id {session_id} @claudeArgs }} }}"
+                "function codex {{ & (Get-Command codex -CommandType Application -ErrorAction Stop) -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' @args }}; function claude {{ $claudeArgs = $args; $hasSessionArgument = $claudeArgs | Where-Object {{ $_ -in @('--resume', '-r', '--continue', '-c', '--session-id') -or $_ -like '--resume=*' -or $_ -like '--session-id=*' }}; if ($hasSessionArgument) {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) @claudeArgs }} else {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) --session-id {session_id} @claudeArgs }} }}; function pi {{ $piArgs = $args; $hasSessionArgument = $piArgs | Where-Object {{ $_ -in @('--resume', '-r', '--continue', '-c', '--session', '--session-id') -or $_ -like '--resume=*' -or $_ -like '--session=*' -or $_ -like '--session-id=*' }}; if ($hasSessionArgument) {{ & (Get-Command pi -CommandType Application -ErrorAction Stop) @piArgs }} else {{ & (Get-Command pi -CommandType Application -ErrorAction Stop) --session-id {session_id} @piArgs }} }}"
             )),
             _ => None,
         }
@@ -2398,6 +2487,10 @@ impl AgentPanel {
                 || "claude".to_string(),
                 |terminal_id| format!("claude --session-id {}", terminal_id.to_key_string()),
             ),
+            "pi" => terminal_id.map_or_else(
+                || "pi".to_string(),
+                |terminal_id| format!("pi --session-id {}", terminal_id.to_key_string()),
+            ),
             _ => command.to_string(),
         }
     }
@@ -2410,6 +2503,14 @@ impl AgentPanel {
         if agent_cli == "claude" {
             let session_id = uuid::Uuid::parse_str(session_prefix).ok()?;
             return Some(format!("claude --resume {session_id}"));
+        }
+        if agent_cli == "pi" {
+            let session_id = uuid::Uuid::parse_str(session_prefix).ok()?;
+            return Some(format!("pi --session {session_id}"));
+        }
+        if agent_cli == "agy" {
+            let session_id = uuid::Uuid::parse_str(session_prefix).ok()?;
+            return Some(format!("agy --conversation {session_id}"));
         }
         if agent_cli != "codex" || codex_session_prefix(&format!("{session_prefix}...")).is_none() {
             return None;
@@ -2719,7 +2820,9 @@ impl AgentPanel {
                     terminal.agent_cli_session_prefix = None;
                 }
                 terminal.agent_cli = Some(program.clone());
-                if program == "claude" && terminal.agent_cli_session_prefix.is_none() {
+                if (program == "claude" || program == "pi")
+                    && terminal.agent_cli_session_prefix.is_none()
+                {
                     terminal.agent_cli_session_prefix = Some(terminal_id.to_key_string());
                 }
             }
@@ -6286,6 +6389,8 @@ impl AgentPanel {
             .and_then(|terminal| terminal.last_observed_program.as_deref());
         let showing_codex = active_terminal_agent_program == Some("codex");
         let showing_claude = active_terminal_agent_program == Some("claude");
+        let showing_pi = active_terminal_agent_program == Some("pi");
+        let showing_agy = active_terminal_agent_program == Some("agy");
 
         let (selected_agent_custom_icon, selected_agent_label) = if showing_terminal {
             (
@@ -6294,6 +6399,10 @@ impl AgentPanel {
                     "Codex"
                 } else if showing_claude {
                     "Claude"
+                } else if showing_pi {
+                    "Pi"
+                } else if showing_agy {
+                    "Antigravity"
                 } else {
                     "Terminal"
                 }),
@@ -6433,6 +6542,60 @@ impl AgentPanel {
                                                     {
                                                         panel.update(cx, |panel, cx| {
                                                             panel.new_claude_terminal(
+                                                                Some(workspace),
+                                                                AgentThreadSource::AgentPanel,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        });
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }),
+                            )
+                            .item(
+                                ContextMenuEntry::new("Pi CLI")
+                                    .action(Box::new(NewPiTerminalThread))
+                                    .icon(IconName::AiPi)
+                                    .icon_color(Color::Muted)
+                                    .handler({
+                                        let workspace = workspace.clone();
+                                        move |window, cx| {
+                                            if let Some(workspace) = workspace.upgrade() {
+                                                workspace.update(cx, |workspace, cx| {
+                                                    if let Some(panel) =
+                                                        workspace.panel::<AgentPanel>(cx)
+                                                    {
+                                                        panel.update(cx, |panel, cx| {
+                                                            panel.new_pi_terminal(
+                                                                Some(workspace),
+                                                                AgentThreadSource::AgentPanel,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        });
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }),
+                            )
+                            .item(
+                                ContextMenuEntry::new("Antigravity CLI")
+                                    .action(Box::new(NewAgyTerminalThread))
+                                    .icon(IconName::AiAntigravity)
+                                    .icon_color(Color::Muted)
+                                    .handler({
+                                        let workspace = workspace.clone();
+                                        move |window, cx| {
+                                            if let Some(workspace) = workspace.upgrade() {
+                                                workspace.update(cx, |workspace, cx| {
+                                                    if let Some(panel) =
+                                                        workspace.panel::<AgentPanel>(cx)
+                                                    {
+                                                        panel.update(cx, |panel, cx| {
+                                                            panel.new_agy_terminal(
                                                                 Some(workspace),
                                                                 AgentThreadSource::AgentPanel,
                                                                 window,
@@ -7036,6 +7199,14 @@ impl Render for AgentPanel {
                     this.new_claude_terminal(None, AgentThreadSource::AgentPanel, window, cx);
                 }),
             )
+            .on_action(cx.listener(|this, _: &NewPiTerminalThread, window, cx| {
+                cx.stop_propagation();
+                this.new_pi_terminal(None, AgentThreadSource::AgentPanel, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewAgyTerminalThread, window, cx| {
+                cx.stop_propagation();
+                this.new_agy_terminal(None, AgentThreadSource::AgentPanel, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_configuration(window, cx);
             }))
@@ -7560,10 +7731,66 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_terminal_pi_command_assigns_only_new_session_ids() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir()?;
+        let executable = directory.path().join("pi");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
+        let terminal_id = TerminalId::new();
+        let session_id = terminal_id.to_key_string();
+        let command =
+            AgentPanel::terminal_agent_session_command(task::ShellKind::Posix, terminal_id)
+                .expect("POSIX shell should have a Pi function");
+
+        let new_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; pi 'initial prompt'")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(
+            String::from_utf8(new_output.stdout)?,
+            format!("--session-id\n{session_id}\ninitial prompt\n")
+        );
+
+        let resume_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; pi --session existing-session")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(
+            String::from_utf8(resume_output.stdout)?,
+            "--session\nexisting-session\n"
+        );
+
+        let continue_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; pi --continue")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(String::from_utf8(continue_output.stdout)?, "--continue\n");
+
+        let resume_picker_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; pi --resume")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(String::from_utf8(resume_picker_output.stdout)?, "--resume\n");
+        Ok(())
+    }
+
     #[test]
     fn test_is_known_terminal_agent_command() {
         assert!(is_known_terminal_agent_command("claude"));
         assert!(is_known_terminal_agent_command("codex"));
+        assert!(is_known_terminal_agent_command("pi"));
         assert!(!is_known_terminal_agent_command("cargo"));
         assert!(!is_known_terminal_agent_command("internal-agent"));
     }
@@ -7579,6 +7806,44 @@ mod tests {
         assert_eq!(
             codex_session_prefix("01a0960e-db2e-7082-b09d-cc25e1234567"),
             Some("01a0960e-db2e-7082-b09d-cc25e1234567".to_string())
+        );
+    }
+
+    #[test]
+    fn test_agy_conversation_id_from_screen() {
+        // The exact wording verified against the real CLI (agy 1.2.7).
+        assert_eq!(
+            agy_conversation_id_from_screen(
+                "Resume with -c (or command below):\nagy --conversation=e8611331-519a-43ae-9ebd-4b6f401859ea"
+            ),
+            Some("e8611331-519a-43ae-9ebd-4b6f401859ea".to_string())
+        );
+        // An older/alternate wording reported for the same hint should still
+        // parse, since the scan only anchors on `--conversation`.
+        assert_eq!(
+            agy_conversation_id_from_screen(
+                "Resume: agy --conversation=d1d8a55b-cc27-4dd4-bc62-2f73015960d2 (or -c)"
+            ),
+            Some("d1d8a55b-cc27-4dd4-bc62-2f73015960d2".to_string())
+        );
+        // The space form (as accepted by the CLI's own flag parser) also works.
+        assert_eq!(
+            agy_conversation_id_from_screen(
+                "agy --conversation e8611331-519a-43ae-9ebd-4b6f401859ea"
+            ),
+            Some("e8611331-519a-43ae-9ebd-4b6f401859ea".to_string())
+        );
+        // Picks the most recent hint when more than one is in the scrollback.
+        assert_eq!(
+            agy_conversation_id_from_screen(
+                "agy --conversation=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nagy --conversation=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+            ),
+            Some("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".to_string())
+        );
+        assert_eq!(agy_conversation_id_from_screen("Hi there!"), None);
+        assert_eq!(
+            agy_conversation_id_from_screen("agy --conversation not-a-uuid"),
+            None
         );
     }
 
@@ -7630,6 +7895,48 @@ mod tests {
         );
         assert_eq!(
             AgentPanel::agent_cli_resume_command("claude", "invalid; command", PathStyle::Unix),
+            None
+        );
+    }
+
+    #[test]
+    fn test_pi_start_and_resume_commands_use_session_id() {
+        let terminal_id = TerminalId::new();
+        let session_id = terminal_id.to_key_string();
+
+        assert_eq!(
+            AgentPanel::agent_cli_start_command("pi", Some(terminal_id)),
+            format!("pi --session-id {session_id}")
+        );
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("pi", &session_id, PathStyle::Unix),
+            Some(format!("pi --session {session_id}"))
+        );
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("pi", "invalid; command", PathStyle::Unix),
+            None
+        );
+    }
+
+    #[test]
+    fn test_agy_resume_command_uses_discovered_session_id() {
+        // Unlike Claude/Pi, agy has no start-with-chosen-id flag, so a fresh
+        // terminal just runs plain `agy` -- the resume command only exists
+        // once a conversation id has been discovered from the screen (see
+        // `agy_conversation_id_from_screen`).
+        let terminal_id = TerminalId::new();
+        assert_eq!(
+            AgentPanel::agent_cli_start_command("agy", Some(terminal_id)),
+            "agy"
+        );
+
+        let session_id = terminal_id.to_key_string();
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("agy", &session_id, PathStyle::Unix),
+            Some(format!("agy --conversation {session_id}"))
+        );
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("agy", "invalid; command", PathStyle::Unix),
             None
         );
     }

@@ -1489,11 +1489,13 @@ impl Sidebar {
                     TerminalEntry {
                         icon: match active_agent_program
                             .as_deref()
-                            .filter(|program| matches!(*program, "codex" | "claude"))
+                            .filter(|program| matches!(*program, "codex" | "claude" | "pi" | "agy"))
                             .or(metadata.agent_cli.as_deref())
                         {
                             Some("codex") => IconName::AiOpenAi,
                             Some("claude") => IconName::AiClaude,
+                            Some("pi") => IconName::AiPi,
+                            Some("agy") => IconName::AiAntigravity,
                             _ => IconName::Terminal,
                         },
                         icon_color,

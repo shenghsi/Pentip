@@ -1812,6 +1812,8 @@ async fn test_agent_panel_terminals_appear_in_sidebar_and_search(cx: &mut TestAp
     for (agent_cli, expected_icon) in [
         ("codex", IconName::AiOpenAi),
         ("claude", IconName::AiClaude),
+        ("pi", IconName::AiPi),
+        ("agy", IconName::AiAntigravity),
     ] {
         cx.update(|_, cx| {
             TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {

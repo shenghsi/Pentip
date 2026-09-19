@@ -199,3 +199,87 @@ exports the type from `title_setup.rs`. Read the module exports to find it.
 
 `SpinnerLabel` is exported by `ui`, but is absent from the UI prelude.
 Import `crate::SpinnerLabel` when using it inside the UI crate.
+
+---
+
+## [ERR-20260919-001] exec-command-wrapper-syntax
+
+**Logged**: 2026-09-19T20:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: build
+
+### Summary
+
+The command wrapper rejected a malformed JavaScript tool call before the macOS build started.
+
+### Error
+
+```text
+SyntaxError: Unexpected string
+```
+
+### Suggested Fix
+
+Pass a valid JavaScript object to `tools.exec_command`.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: script/bundle-mac
+
+---
+
+## [ERR-20260919-003] cargo-fmt-file-arguments-drop-edition
+
+**Logged**: 2026-09-19T20:30:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: build
+
+### Summary
+
+Passing Rust source paths after `cargo fmt --all --` made rustfmt parse the files without the workspace Rust 2024 edition.
+
+### Error
+
+```text
+error: let chains are only allowed in Rust 2024 or later
+```
+
+### Suggested Fix
+
+Run `cargo fmt --all` without source-file arguments so Cargo supplies the workspace edition.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: Cargo.toml, rust-toolchain.toml
+
+---
+
+## [ERR-20260919-002] bundle-mac-debug-remote-server-path
+
+**Logged**: 2026-09-19T20:00:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: build
+
+### Summary
+
+The debug macOS bundle installed successfully, but `script/bundle-mac` exited with an error after it used the release path for `remote_server`.
+
+### Error
+
+```text
+gzip: can't stat: target/aarch64-apple-darwin/release/remote_server
+```
+
+### Suggested Fix
+
+Use `target_dir` for the final `sign_binary` and `gzip` source paths.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: script/bundle-mac
