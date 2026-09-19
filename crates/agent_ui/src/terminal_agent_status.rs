@@ -11,13 +11,25 @@ pub(crate) fn classify(
     screen_tail: &str,
     terminal_title: &str,
 ) -> DetectedTerminalAgentStatus {
-    if agent_cli == "claude" {
-        return classify_claude(screen_tail, terminal_title);
+    match agent_cli {
+        "claude" => classify_claude(screen_tail, terminal_title),
+        "codex" => classify_codex(screen_tail, terminal_title),
+        "pi" => classify_pi(screen_tail),
+        _ => classify_generic(screen_tail),
     }
-    if agent_cli != "codex" {
-        return classify_generic(screen_tail);
+}
+
+/// Ported from herdr's Pi detection manifest (`src/detect/manifests/pi.toml`
+/// in the `herdr` repo). That manifest has a single rule, unlike herdr's
+/// fuller Claude/Codex manifests: the literal "Working..." anywhere on
+/// screen means Pi is working. There's no upstream rule for Blocked or
+/// Idle, so anything else falls back to `classify_generic`'s bare
+/// known-prompt check.
+fn classify_pi(screen_tail: &str) -> DetectedTerminalAgentStatus {
+    if screen_tail.to_ascii_lowercase().contains("working...") {
+        return DetectedTerminalAgentStatus::Working;
     }
-    classify_codex(screen_tail, terminal_title)
+    classify_generic(screen_tail)
 }
 
 /// Ported from herdr's Codex detection manifest
@@ -645,6 +657,26 @@ mod tests {
         assert_eq!(
             classify("codex", "", "01a0960e"),
             DetectedTerminalAgentStatus::Idle
+        );
+    }
+
+    #[test]
+    fn classifies_pi_status() {
+        assert_eq!(
+            classify("pi", "Working...", ""),
+            DetectedTerminalAgentStatus::Working
+        );
+        assert_eq!(
+            classify("pi", "thinking about the task, Working... now", ""),
+            DetectedTerminalAgentStatus::Working
+        );
+        assert_eq!(
+            classify("pi", "Continue? [y/n]", ""),
+            DetectedTerminalAgentStatus::Blocked
+        );
+        assert_eq!(
+            classify("pi", "some other output", ""),
+            DetectedTerminalAgentStatus::Unknown
         );
     }
 
