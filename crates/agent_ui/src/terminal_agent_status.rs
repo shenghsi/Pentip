@@ -15,6 +15,7 @@ pub(crate) fn classify(
         "claude" => classify_claude(screen_tail, terminal_title),
         "codex" => classify_codex(screen_tail, terminal_title),
         "pi" => classify_pi(screen_tail),
+        "agy" => classify_agy(screen_tail),
         _ => classify_generic(screen_tail),
     }
 }
@@ -30,6 +31,92 @@ fn classify_pi(screen_tail: &str) -> DetectedTerminalAgentStatus {
         return DetectedTerminalAgentStatus::Working;
     }
     classify_generic(screen_tail)
+}
+
+/// Ported from herdr's Antigravity (agy) detection manifest
+/// (`src/detect/manifests/antigravity.toml` in the `herdr` repo), evaluated
+/// highest-priority first with the first match winning, same as this file's
+/// other classifiers. Unlike Claude/Codex/Pi, this is status detection only:
+/// Antigravity has no way to assign or discover a session id from the
+/// outside (`agy --conversation <id>` silently starts a fresh, differently
+/// -id'd conversation when `<id>` doesn't already exist -- verified against
+/// the real CLI, and the reason herdr's own upstream project `flint` leaves
+/// Antigravity unregistered too), so there's no session tracking to layer on
+/// top here.
+fn classify_agy(screen_tail: &str) -> DetectedTerminalAgentStatus {
+    let screen_tail_lower = screen_tail.to_ascii_lowercase();
+
+    // permission_prompt (priority 300).
+    if screen_tail_lower.contains("requesting permission for:")
+        && (screen_tail_lower.contains("do you want to proceed?")
+            || (screen_tail_lower.contains("tab amend")
+                && screen_tail_lower.contains("edit command")))
+    {
+        return DetectedTerminalAgentStatus::Blocked;
+    }
+
+    // spinner_working (priority 100).
+    if screen_tail.lines().any(is_agy_spinner_working_line) {
+        return DetectedTerminalAgentStatus::Working;
+    }
+
+    // background_tasks_working (priority 90).
+    if bottom_non_empty_lines(screen_tail, 5)
+        .lines()
+        .any(is_agy_background_tasks_line)
+    {
+        return DetectedTerminalAgentStatus::Working;
+    }
+
+    classify_generic(screen_tail)
+}
+
+fn is_agy_spinner_character(character: char) -> bool {
+    matches!(character, '\u{2800}'..='\u{28FF}')
+}
+
+/// Antigravity's live "<braille spinner> <verb>ing…" activity line.
+/// Simplified from herdr's exact regex
+/// (`^\s*[\u{2800}-\u{28FF}]+\s+\p{Alphabetic}+\w*ing\b`) to "one or more
+/// braille spinner glyphs, then a word ending in \"ing\"", which every
+/// observed real form of this line satisfies.
+fn is_agy_spinner_working_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let spinner_end = trimmed
+        .char_indices()
+        .find(|(_, character)| !is_agy_spinner_character(*character))
+        .map_or(trimmed.len(), |(index, _)| index);
+    if spinner_end == 0 {
+        return false;
+    }
+    let Some(word) = trimmed[spinner_end..]
+        .strip_prefix(|character: char| character.is_whitespace())
+        .map(|rest| rest.trim_start())
+        .and_then(|rest| rest.split_whitespace().next())
+    else {
+        return false;
+    };
+    word.chars().next().is_some_and(char::is_alphabetic)
+        && word
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_')
+        && word.ends_with("ing")
+}
+
+/// Antigravity's "· N task(s)" background-task status line.
+fn is_agy_background_tasks_line(line: &str) -> bool {
+    line.split('\u{b7}').skip(1).any(|segment| {
+        let segment = segment.trim_start();
+        let digits_end = segment
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(0);
+        digits_end > 0
+            && !segment.starts_with('0')
+            && segment[digits_end..]
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("task")
+    })
 }
 
 /// Ported from herdr's Codex detection manifest
@@ -676,6 +763,54 @@ mod tests {
         );
         assert_eq!(
             classify("pi", "some other output", ""),
+            DetectedTerminalAgentStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn classifies_agy_status() {
+        assert_eq!(
+            classify(
+                "agy",
+                "requesting permission for: bash(rm -rf /tmp/x)\ndo you want to proceed?",
+                "",
+            ),
+            DetectedTerminalAgentStatus::Blocked
+        );
+        assert_eq!(
+            classify(
+                "agy",
+                "requesting permission for: edit(main.rs)\ntab amend · edit command",
+                "",
+            ),
+            DetectedTerminalAgentStatus::Blocked
+        );
+        assert_eq!(
+            classify("agy", "requesting permission for: bash(ls)", ""),
+            DetectedTerminalAgentStatus::Unknown
+        );
+        assert_eq!(
+            classify("agy", "⠋ Thinking", ""),
+            DetectedTerminalAgentStatus::Working
+        );
+        assert_eq!(
+            classify("agy", "  ⠙⠹ Analyzing the codebase", ""),
+            DetectedTerminalAgentStatus::Working
+        );
+        assert_eq!(
+            classify("agy", "⠋ done", ""),
+            DetectedTerminalAgentStatus::Unknown
+        );
+        assert_eq!(
+            classify("agy", "· 3 tasks running", ""),
+            DetectedTerminalAgentStatus::Working
+        );
+        assert_eq!(
+            classify("agy", "· 0 tasks running", ""),
+            DetectedTerminalAgentStatus::Unknown
+        );
+        assert_eq!(
+            classify("agy", "some other output", ""),
             DetectedTerminalAgentStatus::Unknown
         );
     }
