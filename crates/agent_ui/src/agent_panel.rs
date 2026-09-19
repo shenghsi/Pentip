@@ -2371,13 +2371,13 @@ impl AgentPanel {
         let session_id = terminal_id.to_key_string();
         match shell_kind {
             task::ShellKind::Posix => Some(format!(
-                "codex() {{ command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' \"$@\"; }}; claude() {{ case \" $* \" in *\" --resume \"*|*\" --resume=\"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*|*\" --session-id \"*|*\" --session-id=\"*) command claude \"$@\";; *) command claude --session-id {session_id} \"$@\";; esac; }}"
+                "codex() {{ command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' \"$@\"; }}; claude() {{ case \" $* \" in *\" --resume \"*|*\" --resume=\"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*|*\" --session-id \"*|*\" --session-id=\"*) command claude \"$@\";; *) command claude --session-id {session_id} \"$@\";; esac; }}; pi() {{ case \" $* \" in *\" --resume \"*|*\" --resume=\"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*|*\" --session \"*|*\" --session=\"*|*\" --session-id \"*|*\" --session-id=\"*) command pi \"$@\";; *) command pi --session-id {session_id} \"$@\";; esac; }}"
             )),
             task::ShellKind::Fish => Some(format!(
-                "function codex; command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' $argv; end; function claude; if contains -- --resume $argv; or contains -- -r $argv; or contains -- --continue $argv; or contains -- -c $argv; or contains -- --session-id $argv; command claude $argv; else; command claude --session-id {session_id} $argv; end; end"
+                "function codex; command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' $argv; end; function claude; if contains -- --resume $argv; or contains -- -r $argv; or contains -- --continue $argv; or contains -- -c $argv; or contains -- --session-id $argv; command claude $argv; else; command claude --session-id {session_id} $argv; end; end; function pi; if contains -- --resume $argv; or contains -- -r $argv; or contains -- --continue $argv; or contains -- -c $argv; or contains -- --session $argv; or contains -- --session-id $argv; command pi $argv; else; command pi --session-id {session_id} $argv; end; end"
             )),
             task::ShellKind::PowerShell | task::ShellKind::Pwsh => Some(format!(
-                "function codex {{ & (Get-Command codex -CommandType Application -ErrorAction Stop) -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' @args }}; function claude {{ $claudeArgs = $args; $hasSessionArgument = $claudeArgs | Where-Object {{ $_ -in @('--resume', '-r', '--continue', '-c', '--session-id') -or $_ -like '--resume=*' -or $_ -like '--session-id=*' }}; if ($hasSessionArgument) {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) @claudeArgs }} else {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) --session-id {session_id} @claudeArgs }} }}"
+                "function codex {{ & (Get-Command codex -CommandType Application -ErrorAction Stop) -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' @args }}; function claude {{ $claudeArgs = $args; $hasSessionArgument = $claudeArgs | Where-Object {{ $_ -in @('--resume', '-r', '--continue', '-c', '--session-id') -or $_ -like '--resume=*' -or $_ -like '--session-id=*' }}; if ($hasSessionArgument) {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) @claudeArgs }} else {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) --session-id {session_id} @claudeArgs }} }}; function pi {{ $piArgs = $args; $hasSessionArgument = $piArgs | Where-Object {{ $_ -in @('--resume', '-r', '--continue', '-c', '--session', '--session-id') -or $_ -like '--resume=*' -or $_ -like '--session=*' -or $_ -like '--session-id=*' }}; if ($hasSessionArgument) {{ & (Get-Command pi -CommandType Application -ErrorAction Stop) @piArgs }} else {{ & (Get-Command pi -CommandType Application -ErrorAction Stop) --session-id {session_id} @piArgs }} }}"
             )),
             _ => None,
         }
@@ -2398,6 +2398,10 @@ impl AgentPanel {
                 || "claude".to_string(),
                 |terminal_id| format!("claude --session-id {}", terminal_id.to_key_string()),
             ),
+            "pi" => terminal_id.map_or_else(
+                || "pi".to_string(),
+                |terminal_id| format!("pi --session-id {}", terminal_id.to_key_string()),
+            ),
             _ => command.to_string(),
         }
     }
@@ -2410,6 +2414,10 @@ impl AgentPanel {
         if agent_cli == "claude" {
             let session_id = uuid::Uuid::parse_str(session_prefix).ok()?;
             return Some(format!("claude --resume {session_id}"));
+        }
+        if agent_cli == "pi" {
+            let session_id = uuid::Uuid::parse_str(session_prefix).ok()?;
+            return Some(format!("pi --session {session_id}"));
         }
         if agent_cli != "codex" || codex_session_prefix(&format!("{session_prefix}...")).is_none() {
             return None;
@@ -2719,7 +2727,9 @@ impl AgentPanel {
                     terminal.agent_cli_session_prefix = None;
                 }
                 terminal.agent_cli = Some(program.clone());
-                if program == "claude" && terminal.agent_cli_session_prefix.is_none() {
+                if (program == "claude" || program == "pi")
+                    && terminal.agent_cli_session_prefix.is_none()
+                {
                     terminal.agent_cli_session_prefix = Some(terminal_id.to_key_string());
                 }
             }
@@ -7560,10 +7570,66 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_terminal_pi_command_assigns_only_new_session_ids() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir()?;
+        let executable = directory.path().join("pi");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
+        let terminal_id = TerminalId::new();
+        let session_id = terminal_id.to_key_string();
+        let command =
+            AgentPanel::terminal_agent_session_command(task::ShellKind::Posix, terminal_id)
+                .expect("POSIX shell should have a Pi function");
+
+        let new_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; pi 'initial prompt'")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(
+            String::from_utf8(new_output.stdout)?,
+            format!("--session-id\n{session_id}\ninitial prompt\n")
+        );
+
+        let resume_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; pi --session existing-session")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(
+            String::from_utf8(resume_output.stdout)?,
+            "--session\nexisting-session\n"
+        );
+
+        let continue_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; pi --continue")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(String::from_utf8(continue_output.stdout)?, "--continue\n");
+
+        let resume_picker_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; pi --resume")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(String::from_utf8(resume_picker_output.stdout)?, "--resume\n");
+        Ok(())
+    }
+
     #[test]
     fn test_is_known_terminal_agent_command() {
         assert!(is_known_terminal_agent_command("claude"));
         assert!(is_known_terminal_agent_command("codex"));
+        assert!(is_known_terminal_agent_command("pi"));
         assert!(!is_known_terminal_agent_command("cargo"));
         assert!(!is_known_terminal_agent_command("internal-agent"));
     }
@@ -7630,6 +7696,25 @@ mod tests {
         );
         assert_eq!(
             AgentPanel::agent_cli_resume_command("claude", "invalid; command", PathStyle::Unix),
+            None
+        );
+    }
+
+    #[test]
+    fn test_pi_start_and_resume_commands_use_session_id() {
+        let terminal_id = TerminalId::new();
+        let session_id = terminal_id.to_key_string();
+
+        assert_eq!(
+            AgentPanel::agent_cli_start_command("pi", Some(terminal_id)),
+            format!("pi --session-id {session_id}")
+        );
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("pi", &session_id, PathStyle::Unix),
+            Some(format!("pi --session {session_id}"))
+        );
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("pi", "invalid; command", PathStyle::Unix),
             None
         );
     }

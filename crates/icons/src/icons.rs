@@ -26,6 +26,7 @@ pub enum IconName {
     AiOpenAiGptSub,
     AiOpenCode,
     AiOpenRouter,
+    AiPi,
     AiVercel,
     AiXAi,
     AiZed,
