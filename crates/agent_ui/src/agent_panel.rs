@@ -163,6 +163,22 @@ fn codex_session_prefix(title: &str) -> Option<String> {
     })
 }
 
+/// Scans for agy's own "Resume with -c (or command below): agy
+/// --conversation=<id>" hint, which it prints to the terminal's normal
+/// scrollback when an interactive session ends. Verified against the real
+/// CLI (agy 1.2.7): this is the only way to learn a fresh agy conversation's
+/// id, since -- unlike Claude/Pi -- `agy --conversation <id>` can't be used
+/// to assign an id at start; an id that doesn't already exist silently gets
+/// a different, agy-chosen conversation instead. `rsplit_once` picks the
+/// most recent hint if more than one is still in the scrollback window.
+fn agy_conversation_id_from_screen(screen_tail: &str) -> Option<String> {
+    let (_, after) = screen_tail.rsplit_once("--conversation")?;
+    let after = after.strip_prefix('=').or_else(|| after.strip_prefix(' '))?;
+    let token = after.split_whitespace().next()?;
+    uuid::Uuid::parse_str(token).ok()?;
+    Some(token.to_string())
+}
+
 /// Maximum number of idle threads kept in the agent panel's retained list.
 /// Set as a GPUI global to override; otherwise defaults to 5.
 pub struct MaxIdleRetainedThreads(pub usize);
@@ -1131,8 +1147,8 @@ impl AgentTerminal {
 
     fn refresh_metadata(&mut self, cx: &mut App) -> bool {
         let title_changed = self.refresh_title(cx);
-        let session_prefix_changed =
-            if self.agent_cli.is_none() || self.agent_cli.as_deref() == Some("codex") {
+        let session_prefix_changed = match self.agent_cli.as_deref() {
+            None | Some("codex") => {
                 let terminal_title = self.current_terminal_title(cx);
                 if let Some(prefix) = codex_session_prefix(terminal_title.as_ref())
                     && self.agent_cli_session_prefix.as_ref() != Some(&prefix)
@@ -1143,9 +1159,26 @@ impl AgentTerminal {
                 } else {
                     false
                 }
-            } else {
-                false
-            };
+            }
+            Some("agy") => {
+                let screen_tail = self
+                    .view
+                    .read(cx)
+                    .terminal()
+                    .read(cx)
+                    .last_n_non_empty_lines(60)
+                    .join("\n");
+                if let Some(conversation_id) = agy_conversation_id_from_screen(&screen_tail)
+                    && self.agent_cli_session_prefix.as_deref() != Some(conversation_id.as_str())
+                {
+                    self.agent_cli_session_prefix = Some(conversation_id);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
         let current_working_directory = self.view.read(cx).terminal().read(cx).working_directory();
         let working_directory_changed = current_working_directory
             .as_ref()
@@ -2418,6 +2451,10 @@ impl AgentPanel {
         if agent_cli == "pi" {
             let session_id = uuid::Uuid::parse_str(session_prefix).ok()?;
             return Some(format!("pi --session {session_id}"));
+        }
+        if agent_cli == "agy" {
+            let session_id = uuid::Uuid::parse_str(session_prefix).ok()?;
+            return Some(format!("agy --conversation {session_id}"));
         }
         if agent_cli != "codex" || codex_session_prefix(&format!("{session_prefix}...")).is_none() {
             return None;
@@ -7649,6 +7686,44 @@ mod tests {
     }
 
     #[test]
+    fn test_agy_conversation_id_from_screen() {
+        // The exact wording verified against the real CLI (agy 1.2.7).
+        assert_eq!(
+            agy_conversation_id_from_screen(
+                "Resume with -c (or command below):\nagy --conversation=e8611331-519a-43ae-9ebd-4b6f401859ea"
+            ),
+            Some("e8611331-519a-43ae-9ebd-4b6f401859ea".to_string())
+        );
+        // An older/alternate wording reported for the same hint should still
+        // parse, since the scan only anchors on `--conversation`.
+        assert_eq!(
+            agy_conversation_id_from_screen(
+                "Resume: agy --conversation=d1d8a55b-cc27-4dd4-bc62-2f73015960d2 (or -c)"
+            ),
+            Some("d1d8a55b-cc27-4dd4-bc62-2f73015960d2".to_string())
+        );
+        // The space form (as accepted by the CLI's own flag parser) also works.
+        assert_eq!(
+            agy_conversation_id_from_screen(
+                "agy --conversation e8611331-519a-43ae-9ebd-4b6f401859ea"
+            ),
+            Some("e8611331-519a-43ae-9ebd-4b6f401859ea".to_string())
+        );
+        // Picks the most recent hint when more than one is in the scrollback.
+        assert_eq!(
+            agy_conversation_id_from_screen(
+                "agy --conversation=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nagy --conversation=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+            ),
+            Some("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".to_string())
+        );
+        assert_eq!(agy_conversation_id_from_screen("Hi there!"), None);
+        assert_eq!(
+            agy_conversation_id_from_screen("agy --conversation not-a-uuid"),
+            None
+        );
+    }
+
+    #[test]
     fn test_codex_resume_command_resolves_exact_session_prefix() {
         let prefix = "01a0960e-db2e-7082-b09d-cc25e";
         let unix_command = AgentPanel::agent_cli_resume_command("codex", prefix, PathStyle::Unix)
@@ -7715,6 +7790,29 @@ mod tests {
         );
         assert_eq!(
             AgentPanel::agent_cli_resume_command("pi", "invalid; command", PathStyle::Unix),
+            None
+        );
+    }
+
+    #[test]
+    fn test_agy_resume_command_uses_discovered_session_id() {
+        // Unlike Claude/Pi, agy has no start-with-chosen-id flag, so a fresh
+        // terminal just runs plain `agy` -- the resume command only exists
+        // once a conversation id has been discovered from the screen (see
+        // `agy_conversation_id_from_screen`).
+        let terminal_id = TerminalId::new();
+        assert_eq!(
+            AgentPanel::agent_cli_start_command("agy", Some(terminal_id)),
+            "agy"
+        );
+
+        let session_id = terminal_id.to_key_string();
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("agy", &session_id, PathStyle::Unix),
+            Some(format!("agy --conversation {session_id}"))
+        );
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("agy", "invalid; command", PathStyle::Unix),
             None
         );
     }
