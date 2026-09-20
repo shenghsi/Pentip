@@ -1114,6 +1114,15 @@ impl Sidebar {
                         this.close_terminal(metadata, &workspace, window, cx);
                     }
                 }
+                AgentPanelEvent::TerminalGracefulCloseReady { metadata } => {
+                    if let Err(error) = agent_ui::save_agy_session(metadata) {
+                        log::error!("Could not save Antigravity terminal history: {error:#}");
+                    }
+                    if let Some(workspace) = workspace.upgrade() {
+                        let workspace = ThreadEntryWorkspace::Open(workspace);
+                        this.close_terminal_impl(metadata, &workspace, false, window, cx);
+                    }
+                }
                 AgentPanelEvent::ThreadInteracted { thread_id } => {
                     this.record_thread_interacted(thread_id, cx);
                     this.schedule_update_entries(false, cx);
@@ -1489,11 +1498,13 @@ impl Sidebar {
                     TerminalEntry {
                         icon: match active_agent_program
                             .as_deref()
-                            .filter(|program| matches!(*program, "codex" | "claude"))
+                            .filter(|program| matches!(*program, "codex" | "claude" | "pi" | "agy"))
                             .or(metadata.agent_cli.as_deref())
                         {
                             Some("codex") => IconName::AiOpenAi,
                             Some("claude") => IconName::AiClaude,
+                            Some("pi") => IconName::AiPi,
+                            Some("agy") => IconName::AiAntigravity,
                             _ => IconName::Terminal,
                         },
                         icon_color,
@@ -4993,6 +5004,28 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_terminal_impl(metadata, workspace, true, window, cx);
+    }
+
+    fn close_terminal_impl(
+        &mut self,
+        metadata: &TerminalThreadMetadata,
+        workspace: &ThreadEntryWorkspace,
+        allow_graceful_close: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if allow_graceful_close
+            && metadata.agent_cli.as_deref() == Some("agy")
+            && metadata.agent_cli_session_prefix.is_none()
+            && let ThreadEntryWorkspace::Open(workspace) = workspace
+            && let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx)
+            && panel.update(cx, |panel, cx| {
+                panel.begin_graceful_agy_close(metadata.terminal_id, cx)
+            })
+        {
+            return;
+        }
         if let ThreadEntryWorkspace::Closed {
             folder_paths,
             project_group_key,
@@ -7697,6 +7730,51 @@ impl Sidebar {
                         remote_connection: None,
                         working_directory: Some(working_directory.clone()),
                         agent_cli: Some("claude".into()),
+                        agent_cli_session_prefix: Some(session_id),
+                    });
+                    let workspace = this
+                        .find_current_workspace_for_path_list(metadata.folder_paths(), None, cx)
+                        .unwrap_or(workspace);
+                    this.show_thread_list(window, cx);
+                    this.activate_terminal_entry(
+                        metadata,
+                        ThreadEntryWorkspace::Open(workspace),
+                        true,
+                        window,
+                        cx,
+                    );
+                }
+                ThreadsArchiveViewEvent::ActivateCli {
+                    program,
+                    session_id,
+                    title,
+                    working_directory,
+                    updated_at,
+                } => {
+                    let Some(workspace) = this.active_workspace(cx) else {
+                        return;
+                    };
+                    let session_uuid = *session_id;
+                    let session_id = session_uuid.to_string();
+                    let existing = TerminalThreadMetadataStore::global(cx)
+                        .read(cx)
+                        .entries()
+                        .find(|metadata| {
+                            metadata.remote_connection.is_none()
+                                && metadata.agent_cli.as_deref() == Some(program.as_str())
+                                && metadata.agent_cli_session_prefix.as_deref()
+                                    == Some(session_id.as_str())
+                        })
+                        .cloned();
+                    let metadata = existing.unwrap_or_else(|| TerminalThreadMetadata {
+                        terminal_id: agent_ui::TerminalId::from_session_id(session_uuid),
+                        title: title.clone().into(),
+                        custom_title: Some(title.clone().into()),
+                        created_at: *updated_at,
+                        worktree_paths: workspace.read(cx).project().read(cx).worktree_paths(cx),
+                        remote_connection: None,
+                        working_directory: Some(working_directory.clone()),
+                        agent_cli: Some(program.clone()),
                         agent_cli_session_prefix: Some(session_id),
                     });
                     let workspace = this

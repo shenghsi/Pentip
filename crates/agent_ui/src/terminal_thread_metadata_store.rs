@@ -89,6 +89,7 @@ impl TerminalThreadMetadata {
 }
 
 pub(crate) fn codex_thread_display_title(title: &str, session_prefix: &str) -> SharedString {
+    let title = terminal_title_without_prefix(title);
     let title = match title.rsplit_once(" | ") {
         Some((title, "Starting" | "Working" | "Thinking" | "Waiting" | "Ready")) => title,
         _ => title,
@@ -786,6 +787,13 @@ mod tests {
 
     #[test]
     fn test_codex_thread_display_title_hides_session_id() {
+        assert_eq!(
+            codex_thread_display_title(
+                "⠸ Greet user | 01a0982f-4dfd-7f92-a721-81898... | Working",
+                "01a0982f-4dfd-7f92-a721-81898"
+            ),
+            "Greet user"
+        );
         assert_eq!(
             codex_thread_display_title(
                 "Greet user | 01a0982f-4dfd-7f92-a721-81898... | Working",

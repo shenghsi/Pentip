@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::agent_connection_store::AgentConnectionStore;
 use crate::claude_thread_history::{ClaudeSession, load_history as load_claude_history};
+use crate::cli_thread_history::{CliSession, load_agy_history, load_pi_history};
 use crate::codex_thread_history::{CodexSession, load_history};
 
 use crate::thread_metadata_store::{
@@ -65,6 +66,10 @@ enum ArchiveListItem {
         session: ClaudeSession,
         highlight_positions: Vec<usize>,
     },
+    CliEntry {
+        session: CliSession,
+        highlight_positions: Vec<usize>,
+    },
     Entry {
         thread: ThreadMetadata,
         highlight_positions: Vec<usize>,
@@ -77,6 +82,7 @@ impl ArchiveListItem {
             Self::Entry { thread, .. } => Some(thread.created_at.unwrap_or(thread.updated_at)),
             Self::CodexEntry { session, .. } => Some(session.created_at),
             Self::ClaudeEntry { session, .. } => Some(session.updated_at),
+            Self::CliEntry { session, .. } => Some(session.updated_at),
             Self::BucketSeparator(_) => None,
         }
     }
@@ -164,6 +170,13 @@ pub enum ThreadsArchiveViewEvent {
         working_directory: PathBuf,
         updated_at: DateTime<Utc>,
     },
+    ActivateCli {
+        program: String,
+        session_id: uuid::Uuid,
+        title: String,
+        working_directory: PathBuf,
+        updated_at: DateTime<Utc>,
+    },
     CancelRestore {
         thread_id: ThreadId,
     },
@@ -200,6 +213,10 @@ pub struct ThreadsArchiveView {
     claude_history_error: Option<String>,
     loading_claude_history: bool,
     _load_claude_history_task: Task<()>,
+    cli_sessions: Vec<CliSession>,
+    cli_history_error: Option<String>,
+    loading_cli_history: bool,
+    _load_cli_history_task: Task<()>,
 }
 
 impl ThreadsArchiveView {
@@ -282,10 +299,15 @@ impl ThreadsArchiveView {
             claude_history_error: None,
             loading_claude_history: false,
             _load_claude_history_task: Task::ready(()),
+            cli_sessions: Vec::new(),
+            cli_history_error: None,
+            loading_cli_history: false,
+            _load_cli_history_task: Task::ready(()),
         };
 
         this.load_codex_history(cx);
         this.load_claude_history(cx);
+        this.load_cli_history(cx);
         this.update_items(cx);
         this.reload_branch_names_if_threads_changed(cx);
         this
@@ -415,6 +437,70 @@ impl ThreadsArchiveView {
         });
     }
 
+    fn load_cli_history(&mut self, cx: &mut Context<Self>) {
+        let Ok(project_data) = self.workspace.read_with(cx, |workspace, cx| {
+            let project = workspace.project().read(cx);
+            project.is_local().then(|| {
+                let project_paths = project
+                    .visible_worktrees(cx)
+                    .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+                    .collect::<Vec<_>>();
+                (project_paths, project.environment().clone())
+            })
+        }) else {
+            return;
+        };
+        let Some((project_paths, environment)) =
+            project_data.filter(|(paths, _)| !paths.is_empty())
+        else {
+            return;
+        };
+        let agy_working_directory = project_paths[0].clone();
+        let environment =
+            environment.update(cx, |environment, cx| environment.default_environment(cx));
+        self.loading_cli_history = true;
+        self._load_cli_history_task = cx.spawn(async move |this, cx| {
+            let environment = environment.await;
+            let pi_home = environment
+                .as_ref()
+                .and_then(|environment| environment.get("PI_CODING_AGENT_DIR"))
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| paths::home_dir().join(".pi/agent"));
+            let agy_home = paths::home_dir().join(".gemini/antigravity");
+            let result = cx
+                .background_spawn(async move {
+                    let mut sessions = load_pi_history(&pi_home, &project_paths)?;
+                    sessions.extend(load_agy_history(&agy_home, &agy_working_directory)?);
+                    anyhow::Ok(sessions)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.loading_cli_history = false;
+                match result {
+                    Ok(sessions) => this.cli_sessions = sessions,
+                    Err(error) => {
+                        log::error!("Could not load terminal agent history: {error:#}");
+                        this.cli_history_error =
+                            Some(format!("Could not load terminal agent history: {error}"));
+                    }
+                }
+                this.update_items(cx);
+            })
+            .log_err();
+        });
+    }
+
+    fn activate_cli_session(&mut self, session: CliSession, cx: &mut Context<Self>) {
+        cx.emit(ThreadsArchiveViewEvent::ActivateCli {
+            program: session.program.into(),
+            session_id: session.id,
+            title: session.title,
+            working_directory: session.working_directory,
+            updated_at: session.updated_at,
+        });
+    }
+
     pub fn has_selection(&self) -> bool {
         self.selection.is_some()
     }
@@ -455,6 +541,7 @@ impl ThreadsArchiveView {
             && store.archived_entries().next().is_none()
             && !self.codex_sessions.iter().any(|session| session.archived)
             && self.claude_sessions.is_empty()
+            && self.cli_sessions.is_empty()
         {
             self.thread_filter = ThreadFilter::All;
         }
@@ -550,6 +637,22 @@ impl ThreadsArchiveView {
                 continue;
             };
             items.push(ArchiveListItem::ClaudeEntry {
+                session: session.clone(),
+                highlight_positions,
+            });
+        }
+        for session in &self.cli_sessions {
+            if self.thread_filter == ThreadFilter::ArchivedOnly {
+                continue;
+            }
+            let highlight_positions = if query.is_empty() {
+                Vec::new()
+            } else if let Some(positions) = fuzzy_match_positions(&query, &session.title) {
+                positions
+            } else {
+                continue;
+            };
+            items.push(ArchiveListItem::CliEntry {
                 session: session.clone(),
                 highlight_positions,
             });
@@ -730,7 +833,12 @@ impl ThreadsArchiveView {
     fn is_selectable_item(&self, ix: usize) -> bool {
         matches!(
             self.items.get(ix),
-            Some(ArchiveListItem::Entry { .. } | ArchiveListItem::CodexEntry { .. })
+            Some(
+                ArchiveListItem::Entry { .. }
+                    | ArchiveListItem::CodexEntry { .. }
+                    | ArchiveListItem::ClaudeEntry { .. }
+                    | ArchiveListItem::CliEntry { .. }
+            )
         )
     }
 
@@ -823,6 +931,9 @@ impl ThreadsArchiveView {
             Some(ArchiveListItem::ClaudeEntry { session, .. }) => {
                 self.activate_claude_session(session, cx)
             }
+            Some(ArchiveListItem::CliEntry { session, .. }) => {
+                self.activate_cli_session(session, cx)
+            }
             _ => {}
         }
     }
@@ -896,6 +1007,35 @@ impl ThreadsArchiveView {
                 }))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.activate_claude_session(session.clone(), cx);
+                }))
+                .into_any_element()
+            }
+            ArchiveListItem::CliEntry {
+                session,
+                highlight_positions,
+            } => {
+                let session = session.clone();
+                let icon = if session.program == "pi" {
+                    IconName::AiPi
+                } else {
+                    IconName::AiAntigravity
+                };
+                ThreadItem::new(
+                    SharedString::from(format!("{}-history-{}", session.program, session.id)),
+                    SharedString::from(session.title.clone()),
+                )
+                .icon(icon)
+                .timestamp(format_history_entry_timestamp(session.updated_at))
+                .highlight_positions(highlight_positions.clone())
+                .project_paths(vec![session.working_directory.clone()].into())
+                .focused(self.selection == Some(ix))
+                .hovered(self.hovered_index == Some(ix))
+                .on_hover(cx.listener(move |this, hovered, _, cx| {
+                    this.hovered_index = if *hovered { Some(ix) } else { None };
+                    cx.notify();
+                }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.activate_cli_session(session.clone(), cx);
                 }))
                 .into_any_element()
             }
@@ -1233,7 +1373,10 @@ impl ThreadsArchiveView {
             .filter(|item| {
                 matches!(
                     item,
-                    ArchiveListItem::Entry { .. } | ArchiveListItem::CodexEntry { .. }
+                    ArchiveListItem::Entry { .. }
+                        | ArchiveListItem::CodexEntry { .. }
+                        | ArchiveListItem::ClaudeEntry { .. }
+                        | ArchiveListItem::CliEntry { .. }
                 )
             })
             .count();
@@ -1343,7 +1486,10 @@ impl Render for ThreadsArchiveView {
         let has_query = !self.filter_editor.read(cx).text(cx).is_empty();
 
         let content = if is_empty {
-            let message = if self.loading_codex_history || self.loading_claude_history {
+            let message = if self.loading_codex_history
+                || self.loading_claude_history
+                || self.loading_cli_history
+            {
                 "Loading CLI history…"
             } else if has_query {
                 "No threads match your search."
@@ -1409,6 +1555,9 @@ impl Render for ThreadsArchiveView {
                         .size(LabelSize::Small)
                         .color(Color::Warning),
                 )
+            })
+            .when_some(self.cli_history_error.clone(), |this, error| {
+                this.child(Label::new(error).size(LabelSize::Small).color(Color::Error))
             })
             .child(content)
     }

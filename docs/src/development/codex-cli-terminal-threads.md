@@ -10,7 +10,7 @@ Pentip can connect external agents through the Agent Client Protocol (ACP).
 Some users want to use the native agent CLI instead. They want the CLI to run
 in an Agent Panel terminal and appear in the Threads Sidebar.
 
-The supported direct launches are Codex CLI and Claude Code CLI.
+The supported direct launches are Codex CLI and Claude CLI.
 
 This design keeps the change close to Zed upstream. It uses the existing
 Terminal Thread code in `agent_ui`. It does not port the separate Flint
@@ -24,7 +24,7 @@ Terminal Thread code in `agent_ui`. It does not port the separate Flint
 4. Pentip sends `codex` to the terminal shell.
 5. The terminal appears as **Codex** in the Agent Panel and Threads Sidebar.
 
-Select **Claude Code CLI** for the same flow with Claude Code. Pentip starts a
+Select **Claude CLI** for the same flow with Claude Code. Pentip starts a
 new Claude session with `claude --session-id <terminal-id>`.
 
 The normal **Terminal** option stays available. It opens a terminal without a

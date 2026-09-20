@@ -35,6 +35,8 @@ pub mod thread_metadata_store;
 pub mod thread_worktree_archive;
 
 mod claude_thread_history;
+mod cli_thread_history;
+pub use cli_thread_history::save_agy_session;
 mod codex_thread_history;
 pub mod threads_archive_view;
 mod ui;
@@ -331,8 +333,12 @@ actions!(
         NewTerminalThread,
         /// Starts a new Codex CLI terminal thread.
         NewCodexTerminalThread,
-        /// Starts a new Claude Code CLI terminal thread.
+        /// Starts a new Claude CLI terminal thread.
         NewClaudeTerminalThread,
+        /// Starts a new Pi CLI terminal thread.
+        NewPiTerminalThread,
+        /// Starts a new Antigravity CLI terminal thread.
+        NewAgyTerminalThread,
     ]
 );
 
