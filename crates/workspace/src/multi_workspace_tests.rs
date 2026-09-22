@@ -47,6 +47,34 @@ fn setup_multi_workspace<'a>(
 }
 
 #[gpui::test]
+async fn test_agentic_layout_toggles_between_agent_and_editor_modes(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let project = Project::test(fs, [], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    multi_workspace.read_with(cx, |multi_workspace, cx| {
+        assert!(multi_workspace.is_agentic_layout(cx));
+        assert_eq!(multi_workspace.agentic_mode(), AgenticMode::Agent);
+    });
+
+    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.toggle_agentic_mode(&ToggleAgentMode, window, cx);
+    });
+    multi_workspace.read_with(cx, |multi_workspace, _cx| {
+        assert_eq!(multi_workspace.agentic_mode(), AgenticMode::Editor);
+    });
+
+    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.toggle_agentic_mode(&ToggleAgentMode, window, cx);
+    });
+    multi_workspace.read_with(cx, |multi_workspace, _cx| {
+        assert_eq!(multi_workspace.agentic_mode(), AgenticMode::Agent);
+    });
+}
+
+#[gpui::test]
 async fn test_sidebar_disabled_when_disable_ai_is_enabled(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());

@@ -65,3 +65,5 @@ Sponsorships go directly to Zed Industries and are used as general company reven
 There are no perks or entitlements associated with sponsorship.
 > [!IMPORTANT]
 > Remove this line to confirm you've reviewed this PR before submitting.
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.

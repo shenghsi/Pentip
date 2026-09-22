@@ -194,6 +194,10 @@ pub struct AutoCompactSettingsContent {
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
 pub struct AgentSettingsContent {
+    /// The workspace layout used for agent and editor surfaces.
+    ///
+    /// Default: agentic
+    pub layout: Option<AgentWindowLayout>,
     /// Whether the Agent is enabled.
     ///
     /// Default: true
@@ -357,6 +361,16 @@ pub struct AgentSettingsContent {
     /// These are populated when choosing "Allow always" from a sandbox
     /// escalation prompt.
     pub sandbox_permissions: Option<SandboxPermissionsContent>,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentWindowLayout {
+    #[default]
+    Agentic,
+    Classic,
 }
 
 impl AgentSettingsContent {

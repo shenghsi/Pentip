@@ -229,6 +229,7 @@
   - [FreeBSD](./development/freebsd.md)
   - [Using Debuggers](./development/debuggers.md)
   - [Codex CLI Terminal Threads](./development/codex-cli-terminal-threads.md)
+  - [Agentic Layout Modes](./development/agent-editor-modes.md)
   - [Performance](./performance.md)
   - [Glossary](./development/glossary.md)
 - [Release Notes](./development/release-notes.md)

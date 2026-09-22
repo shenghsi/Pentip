@@ -4656,6 +4656,7 @@ mod tests {
                 active_workspace_id: Some(WorkspaceId(2)),
                 project_groups: vec![],
                 sidebar_open: true,
+                agent_mode: true,
                 sidebar_state: None,
             },
         )
@@ -4668,6 +4669,7 @@ mod tests {
                 active_workspace_id: Some(WorkspaceId(3)),
                 project_groups: vec![],
                 sidebar_open: false,
+                agent_mode: false,
                 sidebar_state: None,
             },
         )

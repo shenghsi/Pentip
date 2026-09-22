@@ -31,7 +31,7 @@ mod workspace_settings;
 
 pub use dock::Panel;
 pub use multi_workspace::{
-    CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar, MoveProjectDown,
+    AgenticMode, CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar, MoveProjectDown,
     MoveProjectToNewWindow, MoveProjectUp, MultiWorkspace, MultiWorkspaceEvent, NewThread,
     NextProject, NextThread, PreviousProject, PreviousThread, ProjectGroup, ProjectGroupKey,
     RemovalIntent, SerializedProjectGroupState, Sidebar, SidebarEvent, SidebarHandle,
@@ -43,6 +43,7 @@ pub use remote::{
 };
 pub use toast_layer::{ToastAction, ToastLayer, ToastView};
 
+use agent_settings::{AgentSettings, WindowLayout};
 use anyhow::{Context as _, Result, anyhow};
 use client::{
     ChannelId, Client, ErrorExt, ParticipantIndex, Status, TypedEnvelope, User, UserStore,
@@ -60,12 +61,13 @@ use futures::{
     future::{Shared, try_join_all},
 };
 use gpui::{
-    Action, AnyEntity, AnyView, AnyWeakView, App, AsyncApp, AsyncWindowContext, Axis, Bounds,
-    Context, CursorStyle, Decorations, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, Global, HitboxBehavior, Hsla, KeyContext, Keystroke, ManagedView, MouseButton,
-    PathPromptOptions, Point, PromptLevel, Render, ResizeEdge, Size, Stateful, Subscription,
-    SystemWindowTabController, Task, TaskExt, Tiling, WeakEntity, WindowBounds, WindowHandle,
-    WindowId, WindowOptions, actions, canvas, point, relative, size, transparent_black,
+    Action, AnyElement, AnyEntity, AnyView, AnyWeakView, App, AsyncApp, AsyncWindowContext, Axis,
+    Bounds, Context, CursorStyle, Decorations, DragMoveEvent, Entity, EntityId, EventEmitter,
+    FocusHandle, Focusable, Global, HitboxBehavior, Hsla, KeyContext, Keystroke, ManagedView,
+    MouseButton, PathPromptOptions, Point, PromptLevel, Render, ResizeEdge, Size, Stateful,
+    Subscription, SystemWindowTabController, Task, TaskExt, Tiling, WeakEntity, WindowBounds,
+    WindowHandle, WindowId, WindowOptions, actions, canvas, point, relative, size,
+    transparent_black,
 };
 pub use history_manager::*;
 pub use item::{
@@ -280,6 +282,8 @@ actions!(
         CloseAllDocks,
         /// Toggles all docks.
         ToggleAllDocks,
+        /// Switches between Agent Mode and Editor Mode in Agentic Layout.
+        ToggleAgentMode,
         /// Closes the current window.
         CloseWindow,
         /// Closes the current project.
@@ -1438,6 +1442,7 @@ pub struct Workspace {
     /// use this instead of going through the `multi_workspace` field to avoid
     /// reading it as we might end up in a double lease otherwise.
     active_workspace_id: Option<Rc<Cell<EntityId>>>,
+    agentic_mode: Option<Rc<Cell<AgenticMode>>>,
     active_worktree_creation: ActiveWorktreeCreation,
     deferred_save_items: Vec<Box<dyn WeakItemHandle>>,
     persisted_recent_navigation_history: Vec<PathBuf>,
@@ -1904,6 +1909,7 @@ impl Workspace {
             sidebar_focus_handle: None,
             multi_workspace,
             active_workspace_id: None,
+            agentic_mode: None,
             active_worktree_creation: ActiveWorktreeCreation::default(),
             open_in_dev_container: false,
             _dev_container_task: None,
@@ -2235,6 +2241,52 @@ impl Workspace {
 
     pub fn all_docks(&self) -> [&Entity<Dock>; 3] {
         [&self.left_dock, &self.bottom_dock, &self.right_dock]
+    }
+
+    pub fn agent_panel_handle(&self, cx: &App) -> Option<Arc<dyn PanelHandle>> {
+        self.all_docks()
+            .into_iter()
+            .find_map(|dock| dock.read(cx).agent_panel(cx))
+    }
+
+    fn agentic_panel_preserving_dock<T: Panel>(&self, cx: &App) -> Option<Entity<T>> {
+        if !matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_)) {
+            return None;
+        }
+        let panel = self.panel::<T>(cx)?;
+        if !panel.read(cx).is_agent_panel() {
+            return None;
+        }
+        self.all_docks()
+            .into_iter()
+            .find(|dock| dock.read(cx).panel::<T>().is_some())
+            .and_then(|dock| {
+                dock.read(cx)
+                    .active_panel()
+                    .is_some_and(|active_panel| !active_panel.is_agent_panel(cx))
+                    .then_some(panel)
+            })
+    }
+
+    pub fn enter_agentic_mode(&self, mode: AgenticMode, window: &mut Window, cx: &mut App) {
+        if matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_))
+            && self.agent_panel_handle(cx).is_some()
+            && self
+                .agentic_mode
+                .as_ref()
+                .is_some_and(|active_mode| active_mode.get() != mode)
+        {
+            window.dispatch_action(ToggleAgentMode.boxed_clone(), cx);
+        }
+    }
+
+    pub fn is_agentic_agent_mode(&self, cx: &App) -> bool {
+        self.owns_window_chrome()
+            && matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_))
+            && self
+                .agentic_mode
+                .as_ref()
+                .is_some_and(|mode| mode.get() == AgenticMode::Agent)
     }
 
     pub fn capture_dock_state(&self, _window: &Window, cx: &App) -> DockStructure {
@@ -2648,6 +2700,7 @@ impl Workspace {
         &mut self,
         multi_workspace: WeakEntity<MultiWorkspace>,
         active_workspace_id: Rc<Cell<EntityId>>,
+        agentic_mode: Rc<Cell<AgenticMode>>,
         cx: &mut App,
     ) {
         self.status_bar.update(cx, |status_bar, cx| {
@@ -2655,6 +2708,7 @@ impl Workspace {
         });
         self.multi_workspace = Some(multi_workspace);
         self.active_workspace_id = Some(active_workspace_id);
+        self.agentic_mode = Some(agentic_mode);
     }
 
     pub fn app_state(&self) -> &Arc<AppState> {
@@ -4417,6 +4471,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<T>> {
+        if let Some(panel) = self.agentic_panel_preserving_dock::<T>(cx) {
+            self.enter_agentic_mode(AgenticMode::Agent, window, cx);
+            panel.activation_focus_handle(cx).focus(window, cx);
+            return Some(panel);
+        }
+        if let Some(panel) = self.panel::<T>(cx) {
+            let mode = if panel.read(cx).is_agent_panel() {
+                AgenticMode::Agent
+            } else {
+                AgenticMode::Editor
+            };
+            self.enter_agentic_mode(mode, window, cx);
+        }
         let panel = self.focus_or_unfocus_panel::<T>(window, cx, &mut |_, _, _| true)?;
         panel.to_any().downcast().ok()
     }
@@ -4430,6 +4497,20 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(panel) = self.agentic_panel_preserving_dock::<T>(cx) {
+            self.enter_agentic_mode(AgenticMode::Agent, window, cx);
+            panel.activation_focus_handle(cx).focus(window, cx);
+            return true;
+        }
+        if let Some(panel) = self.panel::<T>(cx) {
+            let mode = if panel.read(cx).is_agent_panel() {
+                AgenticMode::Agent
+            } else {
+                AgenticMode::Editor
+            };
+            self.enter_agentic_mode(mode, window, cx);
+        }
+
         let mut did_focus_panel = false;
         self.focus_or_unfocus_panel::<T>(window, cx, &mut |panel, window, cx| {
             did_focus_panel = !panel.panel_focus_handle(cx).contains_focused(window, cx);
@@ -4450,6 +4531,7 @@ impl Workspace {
     }
 
     pub fn focus_center_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.enter_agentic_mode(AgenticMode::Editor, window, cx);
         if let Some(item) = self.active_item(cx) {
             item.item_focus_handle(cx).focus(window, cx);
         } else {
@@ -4531,6 +4613,10 @@ impl Workspace {
 
     /// Open the panel of the given type
     pub fn open_panel<T: Panel>(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.agentic_panel_preserving_dock::<T>(cx).is_some() {
+            self.enter_agentic_mode(AgenticMode::Agent, window, cx);
+            return;
+        }
         for dock in self.all_docks() {
             if let Some(panel_index) = dock.read(cx).panel_index_for_type::<T>() {
                 dock.update(cx, |dock, cx| {
@@ -4544,6 +4630,10 @@ impl Workspace {
     /// Open the panel of the given type, dismissing any zoomed items that
     /// would obscure it (e.g. a zoomed terminal).
     pub fn reveal_panel<T: Panel>(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.agentic_panel_preserving_dock::<T>(cx).is_some() {
+            self.enter_agentic_mode(AgenticMode::Agent, window, cx);
+            return;
+        }
         let dock_position = self.all_docks().iter().find_map(|dock| {
             let dock = dock.read(cx);
             dock.panel_index_for_type::<T>().map(|_| dock.position())
@@ -4663,6 +4753,7 @@ impl Workspace {
     ) -> bool {
         if let Some(center_pane) = self.last_active_center_pane.clone() {
             if let Some(center_pane) = center_pane.upgrade() {
+                self.enter_agentic_mode(AgenticMode::Editor, window, cx);
                 center_pane.update(cx, |pane, cx| {
                     pane.add_item(item, true, true, None, window, cx)
                 });
@@ -4704,6 +4795,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if activate_pane || focus_item {
+            self.enter_agentic_mode(AgenticMode::Editor, window, cx);
+        }
         pane.update(cx, |pane, cx| {
             pane.add_item(
                 item,
@@ -4795,6 +4889,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut App,
     ) -> Task<anyhow::Result<Box<dyn ItemHandle>>> {
+        self.enter_agentic_mode(AgenticMode::Editor, window, cx);
+
         let pane = pane.unwrap_or_else(|| {
             self.last_active_center_pane.clone().unwrap_or_else(|| {
                 self.panes
@@ -4952,6 +5048,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<Box<dyn ItemHandle>>> {
+        self.enter_agentic_mode(AgenticMode::Editor, window, cx);
+
         let pane = self.last_active_center_pane.clone().unwrap_or_else(|| {
             self.panes
                 .first()
@@ -5218,6 +5316,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut App,
     ) -> bool {
+        if activate_pane || focus_item {
+            self.enter_agentic_mode(AgenticMode::Editor, window, cx);
+        }
         let result = self.panes.iter().find_map(|pane| {
             pane.read(cx)
                 .index_for_item(item)
@@ -8190,7 +8291,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Stateful<Div>> {
-        if self.zoomed_position == Some(position) {
+        if self.zoomed_position == Some(position) || self.hide_agent_dock_in_editor_mode(dock, cx) {
             return None;
         }
 
@@ -8217,6 +8318,7 @@ impl Workspace {
 
         let mut container = div()
             .id(dock_element_id)
+            .debug_selector(move || dock_element_id.to_string())
             .when(dock_is_open, |this| {
                 this.role(gpui::Role::Complementary)
                     .aria_label(dock_label)
@@ -8278,6 +8380,18 @@ impl Workspace {
         Some(container)
     }
 
+    fn hide_agent_dock_in_editor_mode(&self, dock: &Entity<Dock>, cx: &App) -> bool {
+        matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_))
+            && self
+                .agentic_mode
+                .as_ref()
+                .is_some_and(|mode| mode.get() == AgenticMode::Editor)
+            && dock
+                .read(cx)
+                .active_panel()
+                .is_some_and(|panel| panel.is_agent_panel(cx))
+    }
+
     /// Returns the currently-visible major window regions ("parts"), in a stable
     /// cyclic order: title bar, left dock, editor, right dock, bottom dock,
     /// status bar. Closed docks are skipped. Used by
@@ -8295,8 +8409,7 @@ impl Workspace {
         }
 
         let dock_part = |dock: &Entity<Dock>, wrapper: &FocusHandle| {
-            dock.read(cx)
-                .is_open()
+            (dock.read(cx).is_open() && !self.hide_agent_dock_in_editor_mode(dock, cx))
                 .then(|| FocusablePart::landmark(wrapper.clone(), dock_content_handle(dock, cx)))
         };
 
@@ -9079,11 +9192,74 @@ impl Render for DraggedDock {
     }
 }
 
+impl Workspace {
+    fn render_agentic_agent_mode(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ui_font = theme_settings::setup_ui_font(window, cx);
+        let colors = cx.theme().colors();
+        let agent_panel = self.agent_panel_handle(cx).map(|panel| panel.to_any());
+
+        div()
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .font(ui_font)
+            .text_color(colors.text)
+            .overflow_hidden()
+            .when_some(self.titlebar_item.clone(), |this, item| {
+                this.child(
+                    div()
+                        .id("titlebar-region")
+                        .track_focus(&self.titlebar_focus_handle)
+                        .tab_group()
+                        .role(gpui::Role::Toolbar)
+                        .aria_label("Title bar")
+                        .w_full()
+                        .child(item),
+                )
+            })
+            .child(
+                div()
+                    .id("agent-mode-workspace")
+                    .debug_selector(|| "agent-mode-workspace".to_string())
+                    .relative()
+                    .flex_1()
+                    .w_full()
+                    .overflow_hidden()
+                    .border_t_1()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .bg(colors.background)
+                    .children(agent_panel)
+                    .children(self.render_notifications(window, cx)),
+            )
+            .when(self.status_bar_visible(cx), |this| {
+                this.child(self.status_bar.clone())
+            })
+            .child(self.toast_layer.clone())
+            .into_any_element()
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         static FIRST_PAINT: AtomicBool = AtomicBool::new(true);
         if FIRST_PAINT.swap(false, std::sync::atomic::Ordering::Relaxed) {
             log::info!("Rendered first frame");
+        }
+
+        let show_agent_mode = matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_))
+            && self.agent_panel_handle(cx).is_some()
+            && self
+                .agentic_mode
+                .as_ref()
+                .is_some_and(|mode| mode.get() == AgenticMode::Agent);
+        if show_agent_mode {
+            return self.render_agentic_agent_mode(window, cx);
         }
 
         let centered_layout = self.centered_layout
@@ -9550,6 +9726,7 @@ impl Render for Workspace {
                     })
                     .child(self.toast_layer.clone()),
             )
+            .into_any_element()
     }
 }
 
@@ -9820,10 +9997,24 @@ pub async fn apply_restored_multiworkspace_state(
 ) {
     let MultiWorkspaceState {
         sidebar_open,
+        agent_mode,
         project_groups,
         sidebar_state,
         ..
     } = state;
+
+    window_handle
+        .update(cx, |multi_workspace, _, cx| {
+            multi_workspace.restore_agentic_mode(
+                if *agent_mode {
+                    AgenticMode::Agent
+                } else {
+                    AgenticMode::Editor
+                },
+                cx,
+            );
+        })
+        .ok();
 
     if !project_groups.is_empty() {
         // Resolve linked worktree paths to their main repo paths so

@@ -16,10 +16,11 @@ use project::DisableAiSettings;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{
-    DockPosition, DockSide, IntoGpui, LanguageModelParameters, LanguageModelSelection,
-    NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, RegisterSetting, Settings, SettingsContent,
-    SettingsStore, SidebarDockPosition, SidebarSide, ThinkingBlockDisplay, ToolPermissionMode,
-    update_settings_file, update_settings_file_with_completion,
+    AgentWindowLayout, DockPosition, DockSide, IntoGpui, LanguageModelParameters,
+    LanguageModelSelection, NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, RegisterSetting,
+    Settings, SettingsContent, SettingsStore, SidebarDockPosition, SidebarSide,
+    ThinkingBlockDisplay, ToolPermissionMode, update_settings_file,
+    update_settings_file_with_completion,
 };
 use util::ResultExt as _;
 
@@ -329,10 +330,21 @@ impl AgentSettings {
     pub fn get_layout(cx: &App) -> WindowLayout {
         let store = cx.global::<SettingsStore>();
         let merged = store.merged_settings();
-        let user_layout = store
-            .raw_user_settings()
-            .map(|u| PanelLayout::read_from(u.content.as_ref()))
+        let raw_user_settings = store.raw_user_settings();
+        let user_layout = raw_user_settings
+            .map(|user_settings| PanelLayout::read_from(user_settings.content.as_ref()))
             .unwrap_or_default();
+
+        if let Some(layout) = raw_user_settings
+            .and_then(|user_settings| user_settings.content.agent.as_ref())
+            .and_then(|agent| agent.layout)
+        {
+            return match layout {
+                AgentWindowLayout::Agentic => WindowLayout::Agent(Some(user_layout)),
+                AgentWindowLayout::Classic => WindowLayout::Editor(Some(user_layout)),
+            };
+        }
+
         let merged_layout = PanelLayout::read_from(merged);
 
         if merged_layout.is_agent_layout() {
@@ -343,7 +355,11 @@ impl AgentSettings {
             return WindowLayout::Editor(Some(user_layout));
         }
 
-        WindowLayout::Custom(user_layout)
+        match merged_layout.agent_dock {
+            Some(DockPosition::Left) => WindowLayout::Agent(Some(user_layout)),
+            Some(DockPosition::Right) => WindowLayout::Editor(Some(user_layout)),
+            Some(DockPosition::Bottom) | None => WindowLayout::Custom(user_layout),
+        }
     }
 
     pub fn backfill_editor_layout(fs: Arc<dyn Fs>, cx: &App) {
@@ -368,18 +384,35 @@ impl AgentSettings {
         match layout {
             WindowLayout::Agent(None) => {
                 update_settings_file_with_completion(fs, cx, move |settings, _cx| {
+                    settings.agent.get_or_insert_default().layout =
+                        Some(AgentWindowLayout::Agentic);
                     PanelLayout::AGENT.write_diff_to(&merged, settings);
                 })
             }
             WindowLayout::Editor(None) => {
                 update_settings_file_with_completion(fs, cx, move |settings, _cx| {
+                    settings.agent.get_or_insert_default().layout =
+                        Some(AgentWindowLayout::Classic);
                     PanelLayout::EDITOR.write_diff_to(&merged, settings);
                 })
             }
-            WindowLayout::Agent(Some(saved))
-            | WindowLayout::Editor(Some(saved))
-            | WindowLayout::Custom(saved) => {
+            WindowLayout::Agent(Some(saved)) => {
                 update_settings_file_with_completion(fs, cx, move |settings, _cx| {
+                    settings.agent.get_or_insert_default().layout =
+                        Some(AgentWindowLayout::Agentic);
+                    saved.write_to(settings);
+                })
+            }
+            WindowLayout::Editor(Some(saved)) => {
+                update_settings_file_with_completion(fs, cx, move |settings, _cx| {
+                    settings.agent.get_or_insert_default().layout =
+                        Some(AgentWindowLayout::Classic);
+                    saved.write_to(settings);
+                })
+            }
+            WindowLayout::Custom(saved) => {
+                update_settings_file_with_completion(fs, cx, move |settings, _cx| {
+                    settings.agent.get_or_insert_default().layout = None;
                     saved.write_to(settings);
                 })
             }
@@ -1738,8 +1771,7 @@ mod tests {
         assert_eq!(user_layout.collaboration_panel_dock, None);
         assert_eq!(user_layout.git_panel_dock, None);
 
-        // User sets a combination that doesn't match either preset:
-        // agent on the left but project panel also on the left.
+        // Moving another panel does not disable Agentic Layout.
         SettingsStore::update_global(cx, |store, cx| {
             store
                 .set_user_settings(
@@ -1753,11 +1785,28 @@ mod tests {
         });
 
         let layout = AgentSettings::get_layout(cx);
-        let WindowLayout::Custom(user_layout) = layout else {
-            panic!("expected Custom, got {:?}", layout);
+        let WindowLayout::Agent(Some(user_layout)) = layout else {
+            panic!("expected Agent(Some), got {:?}", layout);
         };
         assert_eq!(user_layout.agent_dock, Some(DockPosition::Left));
         assert_eq!(user_layout.project_panel_dock, Some(DockSide::Left));
+
+        // An explicit layout selection is independent of all panel positions.
+        SettingsStore::update_global(cx, |store, cx| {
+            store
+                .set_user_settings(
+                    r#"{
+                        "agent": { "layout": "classic", "dock": "left" },
+                        "project_panel": { "dock": "right" }
+                    }"#,
+                    cx,
+                )
+                .unwrap();
+        });
+        assert!(matches!(
+            AgentSettings::get_layout(cx),
+            WindowLayout::Editor(_)
+        ));
     }
 
     #[gpui::test]
@@ -1782,9 +1831,10 @@ mod tests {
         });
 
         let original = AgentSettings::get_layout(cx);
-        let WindowLayout::Custom(ref original_user_layout) = original else {
-            panic!("expected Custom, got {:?}", original);
+        let WindowLayout::Editor(ref saved_layout) = original else {
+            panic!("expected Editor, got {:?}", original);
         };
+        let original_user_layout = saved_layout.as_ref().expect("user layout should be saved");
         assert_eq!(original_user_layout.agent_dock, Some(DockPosition::Right));
         assert_eq!(
             original_user_layout.project_panel_dock,
@@ -1802,17 +1852,18 @@ mod tests {
         let layout = AgentSettings::get_layout(cx);
         assert!(matches!(layout, WindowLayout::Agent(_)));
 
-        // Restore the original custom layout.
+        // Restore the original panel positions as Classic Layout.
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |settings| {
+                settings.agent.get_or_insert_default().layout = Some(AgentWindowLayout::Classic);
                 original_user_layout.write_to(settings);
             });
         });
 
-        // Should be back to the same custom layout.
+        // The same panel positions are restored without changing the selected layout.
         let restored = AgentSettings::get_layout(cx);
-        let WindowLayout::Custom(restored_user_layout) = restored else {
-            panic!("expected Custom, got {:?}", restored);
+        let WindowLayout::Editor(Some(restored_user_layout)) = restored else {
+            panic!("expected Editor(Some), got {:?}", restored);
         };
         assert_eq!(restored_user_layout.agent_dock, Some(DockPosition::Right));
         assert_eq!(
@@ -1858,7 +1909,7 @@ mod tests {
             });
 
             let layout = AgentSettings::get_layout(cx);
-            assert!(matches!(layout, WindowLayout::Custom(_)));
+            assert!(matches!(layout, WindowLayout::Agent(_)));
 
             AgentSettings::set_layout(WindowLayout::agent(), fs.clone(), cx)
         })
@@ -1963,11 +2014,8 @@ mod tests {
             // keep everything in the editor layout. The user's experience
             // hasn't changed.
             let layout = AgentSettings::get_layout(cx);
-            let WindowLayout::Custom(user_layout) = layout else {
-                panic!(
-                    "expected Custom (editor values override agent defaults), got {:?}",
-                    layout
-                );
+            let WindowLayout::Editor(Some(user_layout)) = layout else {
+                panic!("expected Editor(Some), got {:?}", layout);
             };
             assert_eq!(user_layout.agent_dock, Some(DockPosition::Right));
             assert_eq!(user_layout.project_panel_dock, Some(DockSide::Right));

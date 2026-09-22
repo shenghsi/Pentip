@@ -106,14 +106,32 @@ impl From<SerializedProjectGroup> for ProjectGroupKey {
 }
 
 /// Per-window state for a MultiWorkspace, persisted to KVP.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MultiWorkspaceState {
     pub active_workspace_id: Option<WorkspaceId>,
     pub sidebar_open: bool,
+    #[serde(default = "default_agent_mode")]
+    pub agent_mode: bool,
     #[serde(alias = "project_group_keys")]
     pub project_groups: Vec<SerializedProjectGroup>,
     #[serde(default)]
     pub sidebar_state: Option<String>,
+}
+
+fn default_agent_mode() -> bool {
+    true
+}
+
+impl Default for MultiWorkspaceState {
+    fn default() -> Self {
+        Self {
+            active_workspace_id: None,
+            sidebar_open: false,
+            agent_mode: true,
+            project_groups: Vec::new(),
+            sidebar_state: None,
+        }
+    }
 }
 
 /// The serialized state of a single MultiWorkspace window from a previous session:

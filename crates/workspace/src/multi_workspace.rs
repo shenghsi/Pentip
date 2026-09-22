@@ -20,7 +20,7 @@ use util::ResultExt;
 use util::path_list::PathList;
 use zed_actions::agents_sidebar::ToggleThreadSwitcher;
 
-use agent_settings::AgentSettings;
+use agent_settings::{AgentSettings, WindowLayout};
 use settings::SidebarDockPosition;
 use ui::{ContextMenu, right_click_menu};
 
@@ -29,9 +29,16 @@ const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 use crate::open_remote_project_with_existing_connection;
 use crate::{
     CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ModalView, OpenMode,
-    Panel, Workspace, WorkspaceId, client_side_decorations,
+    Panel, ToggleAgentMode, Workspace, WorkspaceId, client_side_decorations,
     persistence::model::MultiWorkspaceState,
 };
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AgenticMode {
+    #[default]
+    Agent,
+    Editor,
+}
 
 actions!(
     multi_workspace,
@@ -314,6 +321,7 @@ pub struct MultiWorkspace {
     /// chrome ownership, as that might cause a double lease. Kept in sync with
     /// `active_workspace`.
     active_workspace_id: Rc<Cell<EntityId>>,
+    agentic_mode: Rc<Cell<AgenticMode>>,
     sidebar: Option<Box<dyn SidebarHandle>>,
     sidebar_open: bool,
     sidebar_overlay: Option<AnyView>,
@@ -333,8 +341,13 @@ impl MultiWorkspace {
     }
 
     pub fn sidebar_render_state(&self, cx: &App) -> SidebarRenderState {
+        let open = if self.agentic_modes_available(cx) {
+            self.agentic_mode.get() == AgenticMode::Agent && self.sidebar_open()
+        } else {
+            self.sidebar_open()
+        };
         SidebarRenderState {
-            open: self.sidebar_open() && self.multi_workspace_enabled(cx),
+            open: open && self.multi_workspace_enabled(cx),
             side: self.sidebar_side(cx),
         }
     }
@@ -353,19 +366,34 @@ impl MultiWorkspace {
             let mut previous_multi_workspace_enabled = !DisableAiSettings::get_global(cx)
                 .disable_ai
                 && AgentSettings::get_global(cx).enabled;
+            let mut previous_agentic_layout =
+                matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_));
             move |this, window, cx| {
                 let multi_workspace_enabled = this.multi_workspace_enabled(cx);
                 if previous_multi_workspace_enabled && !multi_workspace_enabled {
                     this.collapse_to_single_workspace(window, cx);
                 }
                 previous_multi_workspace_enabled = multi_workspace_enabled;
+
+                let agentic_layout =
+                    matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_));
+                if agentic_layout && !previous_agentic_layout {
+                    this.set_agentic_mode(AgenticMode::Agent, window, cx);
+                }
+                previous_agentic_layout = agentic_layout;
             }
         });
         Self::subscribe_to_workspace(&workspace, window, cx);
         let weak_self = cx.weak_entity();
         let active_workspace_id = Rc::new(Cell::new(workspace.entity_id()));
+        let agentic_mode = Rc::new(Cell::new(AgenticMode::Agent));
         workspace.update(cx, |workspace, cx| {
-            workspace.set_multi_workspace(weak_self, active_workspace_id.clone(), cx);
+            workspace.set_multi_workspace(
+                weak_self,
+                active_workspace_id.clone(),
+                agentic_mode.clone(),
+                cx,
+            );
         });
         Self {
             window_id: window.window_handle().window_id(),
@@ -376,6 +404,7 @@ impl MultiWorkspace {
             }],
             project_groups: Vec::new(),
             active_workspace_id,
+            agentic_mode,
             sidebar: None,
             sidebar_open: false,
             sidebar_overlay: None,
@@ -417,6 +446,94 @@ impl MultiWorkspace {
         self.sidebar_open
     }
 
+    pub fn agentic_mode(&self) -> AgenticMode {
+        self.agentic_mode.get()
+    }
+
+    pub(crate) fn restore_agentic_mode(&mut self, mode: AgenticMode, cx: &mut Context<Self>) {
+        self.agentic_mode.set(mode);
+        cx.notify();
+        self.workspace().update(cx, |workspace, cx| {
+            for dock in workspace.all_docks() {
+                dock.update(cx, |_, cx| cx.notify());
+            }
+            cx.notify();
+        });
+    }
+
+    pub fn is_agentic_layout(&self, cx: &App) -> bool {
+        matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_))
+    }
+
+    fn agentic_modes_available(&self, cx: &App) -> bool {
+        self.is_agentic_layout(cx) && self.workspace().read(cx).agent_panel_handle(cx).is_some()
+    }
+
+    fn set_agentic_mode(&mut self, mode: AgenticMode, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_agentic_layout(cx) {
+            return;
+        }
+
+        let mode_changed = self.agentic_mode.get() != mode;
+        self.agentic_mode.set(mode);
+        let workspace = self.workspace().clone();
+        match mode {
+            AgenticMode::Agent => {
+                if let Some(sidebar) = &self.sidebar
+                    && self.sidebar_open()
+                {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.set_sidebar_focus_handle(Some(sidebar.focus_handle(cx)));
+                    });
+                } else {
+                    workspace.update(cx, |workspace, _cx| {
+                        workspace.set_sidebar_focus_handle(None);
+                    });
+                }
+                if let Some(panel) = workspace.read(cx).agent_panel_handle(cx) {
+                    window.focus(&panel.activation_focus_handle(cx), cx);
+                }
+            }
+            AgenticMode::Editor => {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.set_sidebar_focus_handle(None);
+                    window.focus(&workspace.focus_handle(cx), cx);
+                });
+            }
+        }
+        workspace.update(cx, |workspace, cx| {
+            for dock in workspace.all_docks() {
+                dock.update(cx, |_, cx| cx.notify());
+            }
+            cx.notify();
+        });
+        if mode_changed {
+            self.serialize(cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_agentic_mode(
+        &mut self,
+        _: &ToggleAgentMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_agentic_layout(cx) {
+            let workspace = self.workspace().clone();
+            if let Some(panel) = workspace.read(cx).agent_panel_handle(cx) {
+                window.dispatch_action(panel.toggle_action(window, cx), cx);
+            }
+            return;
+        }
+
+        let mode = match self.agentic_mode.get() {
+            AgenticMode::Agent => AgenticMode::Editor,
+            AgenticMode::Editor => AgenticMode::Agent,
+        };
+        self.set_agentic_mode(mode, window, cx);
+    }
+
     pub fn sidebar_has_notifications(&self, cx: &App) -> bool {
         self.sidebar
             .as_ref()
@@ -438,6 +555,16 @@ impl MultiWorkspace {
             return;
         }
 
+        if self.agentic_modes_available(cx) && self.agentic_mode.get() == AgenticMode::Editor {
+            self.open_sidebar(cx);
+            self.set_agentic_mode(AgenticMode::Agent, window, cx);
+            if let Some(sidebar) = &self.sidebar {
+                sidebar.prepare_for_focus(window, cx);
+                sidebar.focus(window, cx);
+            }
+            return;
+        }
+
         if self.sidebar_open() {
             self.close_sidebar(window, cx);
         } else {
@@ -455,6 +582,10 @@ impl MultiWorkspace {
             return;
         }
 
+        if self.agentic_modes_available(cx) && self.agentic_mode.get() == AgenticMode::Editor {
+            return;
+        }
+
         if self.sidebar_open() {
             self.close_sidebar(window, cx);
         }
@@ -463,6 +594,21 @@ impl MultiWorkspace {
     pub fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.multi_workspace_enabled(cx) {
             return;
+        }
+
+        if self.agentic_modes_available(cx) {
+            if self.agentic_mode.get() == AgenticMode::Editor {
+                self.set_agentic_mode(AgenticMode::Agent, window, cx);
+            }
+            if !self.sidebar_open() {
+                self.previous_focus_handle = window.focused(cx);
+                self.open_sidebar(cx);
+                if let Some(sidebar) = &self.sidebar {
+                    sidebar.prepare_for_focus(window, cx);
+                    sidebar.focus(window, cx);
+                }
+                return;
+            }
         }
 
         if self.sidebar_open() {
@@ -629,11 +775,26 @@ impl MultiWorkspace {
         })
         .detach();
 
-        cx.subscribe_in(workspace, window, |this, workspace, event, window, cx| {
-            if let WorkspaceEvent::Activate = event {
-                this.activate(workspace.clone(), None, window, cx);
-            }
-        })
+        cx.subscribe_in(
+            workspace,
+            window,
+            |this, workspace, event, window, cx| match event {
+                WorkspaceEvent::Activate => {
+                    this.activate(workspace.clone(), None, window, cx);
+                }
+                WorkspaceEvent::PanelAdded(panel)
+                    if this.is_agentic_layout(cx)
+                        && this.agentic_mode.get() == AgenticMode::Agent
+                        && workspace.read(cx).agent_panel_handle(cx).is_some_and(
+                            |agent_panel| agent_panel.panel_id() == panel.entity_id(),
+                        ) =>
+                {
+                    this.sidebar_open = true;
+                    this.set_agentic_mode(AgenticMode::Agent, window, cx);
+                }
+                _ => {}
+            },
+        )
         .detach();
     }
 
@@ -818,8 +979,9 @@ impl MultiWorkspace {
         Self::subscribe_to_workspace(workspace, window, cx);
         let weak_self = cx.weak_entity();
         let active_workspace_id = self.active_workspace_id.clone();
+        let agentic_mode = self.agentic_mode.clone();
         workspace.update(cx, |workspace, cx| {
-            workspace.set_multi_workspace(weak_self, active_workspace_id, cx);
+            workspace.set_multi_workspace(weak_self, active_workspace_id, agentic_mode, cx);
         });
 
         let entity = cx.entity();
@@ -1482,6 +1644,7 @@ impl MultiWorkspace {
                             })
                             .collect::<Vec<_>>(),
                         sidebar_open: this.sidebar_open,
+                        agent_mode: this.agentic_mode.get() == AgenticMode::Agent,
                         sidebar_state: this.sidebar.as_ref().and_then(|s| s.serialized_state(cx)),
                     };
                     (this.window_id, state)
@@ -2032,8 +2195,15 @@ impl Render for MultiWorkspace {
         let multi_workspace_enabled = self.multi_workspace_enabled(cx);
         let sidebar_side = self.sidebar_side(cx);
         let sidebar_on_right = sidebar_side == SidebarSide::Right;
+        let agent_mode =
+            self.agentic_modes_available(cx) && self.agentic_mode.get() == AgenticMode::Agent;
+        let show_sidebar = if self.agentic_modes_available(cx) {
+            agent_mode && self.sidebar_open()
+        } else {
+            self.sidebar_open()
+        };
 
-        let sidebar: Option<AnyElement> = if multi_workspace_enabled && self.sidebar_open() {
+        let sidebar: Option<AnyElement> = if multi_workspace_enabled && show_sidebar {
             self.sidebar.as_ref().map(|sidebar_handle| {
                 let weak = cx.weak_entity();
 
@@ -2113,6 +2283,7 @@ impl Render for MultiWorkspace {
                 .font(ui_font)
                 .text_color(text_color)
                 .on_action(cx.listener(Self::close_window))
+                .on_action(cx.listener(Self::toggle_agentic_mode))
                 .when(self.multi_workspace_enabled(cx), |this| {
                     this.on_action(cx.listener(
                         |this: &mut Self, _: &ToggleWorkspaceSidebar, window, cx| {
@@ -2183,26 +2354,20 @@ impl Render for MultiWorkspace {
                         ))
                     })
                 })
-                .when(
-                    self.sidebar_open() && self.multi_workspace_enabled(cx),
-                    |this| {
-                        this.on_drag_move(cx.listener(
-                            move |this: &mut Self,
-                                  e: &DragMoveEvent<DraggedSidebar>,
-                                  window,
-                                  cx| {
-                                if let Some(sidebar) = &this.sidebar {
-                                    let new_width = if sidebar_on_right {
-                                        window.bounds().size.width - e.event.position.x
-                                    } else {
-                                        e.event.position.x
-                                    };
-                                    sidebar.set_width(Some(new_width), cx);
-                                }
-                            },
-                        ))
-                    },
-                )
+                .when(show_sidebar && self.multi_workspace_enabled(cx), |this| {
+                    this.on_drag_move(cx.listener(
+                        move |this: &mut Self, e: &DragMoveEvent<DraggedSidebar>, window, cx| {
+                            if let Some(sidebar) = &this.sidebar {
+                                let new_width = if sidebar_on_right {
+                                    window.bounds().size.width - e.event.position.x
+                                } else {
+                                    e.event.position.x
+                                };
+                                sidebar.set_width(Some(new_width), cx);
+                            }
+                        },
+                    ))
+                })
                 .children(left_sidebar)
                 .child(
                     div()

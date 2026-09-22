@@ -61,7 +61,7 @@ use crate::{
     },
     ui::{AgentNotification, AgentNotificationEvent, EndTrialUpsell},
 };
-use agent_settings::AgentSettings;
+use agent_settings::{AgentSettings, WindowLayout};
 use ai_onboarding::AgentPanelOnboarding;
 use anyhow::{Context as _, Result, anyhow};
 #[cfg(feature = "audio")]
@@ -1752,6 +1752,11 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
+        if matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_)) {
+            window.dispatch_action(workspace::ToggleAgentMode.boxed_clone(), cx);
+            return;
+        }
+
         if workspace
             .panel::<Self>(cx)
             .is_some_and(|panel| panel.read(cx).enabled(cx))
@@ -1890,6 +1895,10 @@ impl AgentPanel {
 
     pub fn is_visible(workspace: &Entity<Workspace>, cx: &App) -> bool {
         let workspace_read = workspace.read(cx);
+
+        if workspace_read.is_agentic_agent_mode(cx) {
+            return workspace_read.panel::<AgentPanel>(cx).is_some();
+        }
 
         workspace_read
             .panel::<AgentPanel>(cx)
@@ -2463,13 +2472,13 @@ impl AgentPanel {
         let session_id = terminal_id.to_key_string();
         match shell_kind {
             task::ShellKind::Posix => Some(format!(
-                "codex() {{ command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' \"$@\"; }}; claude() {{ case \" $* \" in *\" --resume \"*|*\" --resume=\"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*|*\" --session-id \"*|*\" --session-id=\"*) command claude \"$@\";; *) command claude --session-id {session_id} \"$@\";; esac; }}; pi() {{ case \" $* \" in *\" --resume \"*|*\" --resume=\"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*|*\" --session \"*|*\" --session=\"*|*\" --session-id \"*|*\" --session-id=\"*) command pi \"$@\";; *) command pi --session-id {session_id} \"$@\";; esac; }}"
+                "codex() {{ command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' \"$@\"; }}; claude() {{ case \" $* \" in *\" --resume \"*|*\" --resume=\"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*|*\" --session-id \"*|*\" --session-id=\"*) command claude \"$@\";; *) command claude --session-id {session_id} \"$@\";; esac; }}; pi() {{ case \"$1\" in install|remove|uninstall|update|list|config|auth) command pi \"$@\";; *) case \" $* \" in *\" --resume \"*|*\" --resume=\"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*|*\" --session \"*|*\" --session=\"*|*\" --session-id \"*|*\" --session-id=\"*) command pi \"$@\";; *) command pi --session-id {session_id} \"$@\";; esac;; esac; }}"
             )),
             task::ShellKind::Fish => Some(format!(
-                "function codex; command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' $argv; end; function claude; if contains -- --resume $argv; or contains -- -r $argv; or contains -- --continue $argv; or contains -- -c $argv; or contains -- --session-id $argv; command claude $argv; else; command claude --session-id {session_id} $argv; end; end; function pi; if contains -- --resume $argv; or contains -- -r $argv; or contains -- --continue $argv; or contains -- -c $argv; or contains -- --session $argv; or contains -- --session-id $argv; command pi $argv; else; command pi --session-id {session_id} $argv; end; end"
+                "function codex; command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' $argv; end; function claude; if contains -- --resume $argv; or contains -- -r $argv; or contains -- --continue $argv; or contains -- -c $argv; or contains -- --session-id $argv; command claude $argv; else; command claude --session-id {session_id} $argv; end; end; function pi; switch \"$argv[1]\"; case install remove uninstall update list config auth; command pi $argv; case '*'; if contains -- --resume $argv; or contains -- -r $argv; or contains -- --continue $argv; or contains -- -c $argv; or contains -- --session $argv; or contains -- --session-id $argv; command pi $argv; else; command pi --session-id {session_id} $argv; end; end; end"
             )),
             task::ShellKind::PowerShell | task::ShellKind::Pwsh => Some(format!(
-                "function codex {{ & (Get-Command codex -CommandType Application -ErrorAction Stop) -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' @args }}; function claude {{ $claudeArgs = $args; $hasSessionArgument = $claudeArgs | Where-Object {{ $_ -in @('--resume', '-r', '--continue', '-c', '--session-id') -or $_ -like '--resume=*' -or $_ -like '--session-id=*' }}; if ($hasSessionArgument) {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) @claudeArgs }} else {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) --session-id {session_id} @claudeArgs }} }}; function pi {{ $piArgs = $args; $hasSessionArgument = $piArgs | Where-Object {{ $_ -in @('--resume', '-r', '--continue', '-c', '--session', '--session-id') -or $_ -like '--resume=*' -or $_ -like '--session=*' -or $_ -like '--session-id=*' }}; if ($hasSessionArgument) {{ & (Get-Command pi -CommandType Application -ErrorAction Stop) @piArgs }} else {{ & (Get-Command pi -CommandType Application -ErrorAction Stop) --session-id {session_id} @piArgs }} }}"
+                "function codex {{ & (Get-Command codex -CommandType Application -ErrorAction Stop) -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' @args }}; function claude {{ $claudeArgs = $args; $hasSessionArgument = $claudeArgs | Where-Object {{ $_ -in @('--resume', '-r', '--continue', '-c', '--session-id') -or $_ -like '--resume=*' -or $_ -like '--session-id=*' }}; if ($hasSessionArgument) {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) @claudeArgs }} else {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) --session-id {session_id} @claudeArgs }} }}; function pi {{ $piArgs = $args; if ($piArgs[0] -in @('install','remove','uninstall','update','list','config','auth')) {{ & (Get-Command pi -CommandType Application -ErrorAction Stop) @piArgs }} else {{ $hasSessionArgument = $piArgs | Where-Object {{ $_ -in @('--resume', '-r', '--continue', '-c', '--session', '--session-id') -or $_ -like '--resume=*' -or $_ -like '--session=*' -or $_ -like '--session-id=*' }}; if ($hasSessionArgument) {{ & (Get-Command pi -CommandType Application -ErrorAction Stop) @piArgs }} else {{ & (Get-Command pi -CommandType Application -ErrorAction Stop) --session-id {session_id} @piArgs }} }} }}"
             )),
             _ => None,
         }
@@ -7680,6 +7689,8 @@ mod tests {
     use project::{Project, WorktreePaths};
     use settings::{SettingsStore, WorkingDirectory};
     use std::any::Any;
+    use workspace::dock::test::{TestPanel, ToggleTestPanel};
+    use workspace::item::test::TestItem;
 
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -7844,6 +7855,39 @@ mod tests {
         assert_eq!(
             String::from_utf8(resume_picker_output.stdout)?,
             "--resume\n"
+        );
+
+        for subcommand in [
+            "install",
+            "remove",
+            "uninstall",
+            "update",
+            "list",
+            "config",
+            "auth",
+        ] {
+            let subcommand_output = gpui::block_on(
+                util::command::new_command("/bin/sh")
+                    .args(["-c", &format!("{command}; pi {subcommand}")])
+                    .env("PATH", directory.path())
+                    .output(),
+            )?;
+            assert_eq!(
+                String::from_utf8(subcommand_output.stdout)?,
+                format!("{subcommand}\n"),
+                "pi {subcommand} should run unmodified instead of starting a session"
+            );
+        }
+
+        let update_extensions_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; pi update --extensions")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(
+            String::from_utf8(update_extensions_output.stdout)?,
+            "update\n--extensions\n"
         );
         Ok(())
     }
@@ -11766,21 +11810,17 @@ mod tests {
             .expect("test terminal should be inserted");
         cx.run_until_parked();
 
-        let workspace = cx.update(|window, cx| {
+        let multi_workspace = cx.update(|window, _cx| {
             window
                 .root::<MultiWorkspace>()
                 .flatten()
                 .expect("test window should have a MultiWorkspace root")
-                .read(cx)
-                .workspace()
-                .clone()
         });
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.focus_handle(cx).focus(window, cx);
+        multi_workspace.update_in(&mut cx, |multi_workspace, window, cx| {
+            multi_workspace.focus_sidebar(window, cx);
         });
         cx.update(|window, cx| {
             assert!(window.is_window_active());
-            assert!(workspace.read(cx).focus_handle(cx).is_focused(window));
             assert!(!panel.read(cx).focus_handle(cx).contains_focused(window, cx));
         });
 
@@ -11802,6 +11842,269 @@ mod tests {
                 .iter()
                 .all(|window| window.downcast::<AgentNotification>().is_none())
         );
+    }
+
+    #[gpui::test]
+    async fn test_editor_mode_does_not_render_agent_panel_dock(cx: &mut TestAppContext) {
+        let (_panel, mut cx) = setup_visible_panel(cx).await;
+
+        assert!(cx.debug_bounds("agent-mode-workspace").is_some());
+
+        cx.dispatch_action(workspace::ToggleAgentMode);
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("agent-mode-workspace").is_none());
+        assert!(cx.debug_bounds("left-dock").is_none());
+    }
+
+    #[gpui::test]
+    async fn test_agent_mode_sidebar_can_be_toggled(cx: &mut TestAppContext) {
+        let (_panel, mut cx) = setup_visible_panel(cx).await;
+        let multi_workspace = cx.update(|window, _cx| {
+            window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .expect("test window should have a MultiWorkspace root")
+        });
+
+        multi_workspace.read_with(&cx, |multi_workspace, cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Agent
+            );
+            assert!(multi_workspace.sidebar_render_state(cx).open);
+        });
+
+        multi_workspace.update_in(&mut cx, |multi_workspace, window, cx| {
+            multi_workspace.toggle_sidebar(window, cx);
+        });
+        multi_workspace.read_with(&cx, |multi_workspace, cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Agent
+            );
+            assert!(!multi_workspace.sidebar_render_state(cx).open);
+        });
+
+        multi_workspace.update_in(&mut cx, |multi_workspace, window, cx| {
+            multi_workspace.toggle_sidebar(window, cx);
+        });
+        multi_workspace.read_with(&cx, |multi_workspace, cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Agent
+            );
+            assert!(multi_workspace.sidebar_render_state(cx).open);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_agent_panel_button_switches_agentic_modes(cx: &mut TestAppContext) {
+        let (_panel, mut cx) = setup_visible_panel(cx).await;
+        let multi_workspace = cx.update(|window, _cx| {
+            window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .expect("test window should have a MultiWorkspace root")
+        });
+
+        let agent_button = cx
+            .debug_bounds("agent-panel-status-button")
+            .expect("Agent Panel button should be visible in Agent Mode");
+        cx.simulate_click(agent_button.center(), Modifiers::default());
+        cx.run_until_parked();
+        multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Editor
+            );
+        });
+
+        let agent_button = cx
+            .debug_bounds("agent-panel-status-button")
+            .expect("Agent Panel button should be visible in Editor Mode");
+        cx.simulate_click(agent_button.center(), Modifiers::default());
+        cx.run_until_parked();
+        multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Agent
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_panel_button_opens_panel_from_agentic_editor_mode(cx: &mut TestAppContext) {
+        let (_panel, mut cx) = setup_visible_panel(cx).await;
+        let multi_workspace = cx.update(|window, _cx| {
+            window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .expect("test window should have a MultiWorkspace root")
+        });
+        let workspace = multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            multi_workspace.workspace().clone()
+        });
+        let test_panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.register_action(|workspace, _: &ToggleTestPanel, window, cx| {
+                workspace.toggle_panel_focus::<TestPanel>(window, cx);
+            });
+            let test_panel = cx
+                .new(|cx| TestPanel::new_with_icon(DockPosition::Left, 1, IconName::FileTree, cx));
+            workspace.add_panel(test_panel.clone(), window, cx);
+            test_panel
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(workspace::ToggleAgentMode);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("left-dock").is_none());
+
+        let test_panel_button = cx
+            .debug_bounds("testpanel-status-button")
+            .expect("test panel button should be visible in Editor Mode");
+        cx.simulate_click(test_panel_button.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("left-dock").is_some());
+        workspace.read_with(&cx, |workspace, cx| {
+            let left_dock = workspace.left_dock().read(cx);
+            assert!(left_dock.is_open());
+            assert_eq!(
+                left_dock.active_panel().map(|panel| panel.panel_id()),
+                Some(test_panel.entity_id())
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_thread_focus_preserves_agentic_editor_dock(cx: &mut TestAppContext) {
+        let (_panel, mut cx) = setup_visible_panel(cx).await;
+        let multi_workspace = cx.update(|window, _cx| {
+            window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .expect("test window should have a MultiWorkspace root")
+        });
+        let workspace = multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            multi_workspace.workspace().clone()
+        });
+        let test_panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let test_panel = cx
+                .new(|cx| TestPanel::new_with_icon(DockPosition::Left, 1, IconName::FileTree, cx));
+            workspace.add_panel(test_panel.clone(), window, cx);
+            test_panel
+        });
+
+        cx.dispatch_action(workspace::ToggleAgentMode);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focus_panel::<TestPanel>(window, cx);
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(workspace::ToggleAgentMode);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(workspace.read_with(&cx, |_, cx| AgentPanel::is_visible(&workspace, cx)));
+
+        cx.dispatch_action(workspace::ToggleAgentMode);
+        cx.run_until_parked();
+
+        multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Editor
+            );
+        });
+        workspace.read_with(&cx, |workspace, cx| {
+            let left_dock = workspace.left_dock().read(cx);
+            assert!(left_dock.is_open());
+            assert_eq!(
+                left_dock.active_panel().map(|panel| panel.panel_id()),
+                Some(test_panel.entity_id())
+            );
+        });
+        assert!(cx.debug_bounds("left-dock").is_some());
+    }
+
+    #[gpui::test]
+    async fn test_center_item_actions_switch_to_agentic_editor_mode(cx: &mut TestAppContext) {
+        let (_panel, mut cx) = setup_visible_panel(cx).await;
+        let multi_workspace = cx.update(|window, _cx| {
+            window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .expect("test window should have a MultiWorkspace root")
+        });
+        let workspace = multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            multi_workspace.workspace().clone()
+        });
+        let item = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let item = cx.new(TestItem::new);
+            workspace.add_item_to_active_pane(Box::new(item.clone()), None, true, window, cx);
+            item
+        });
+        cx.run_until_parked();
+
+        multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Editor
+            );
+        });
+
+        cx.dispatch_action(workspace::ToggleAgentMode);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            assert!(workspace.activate_item(&item, true, true, window, cx));
+        });
+        cx.run_until_parked();
+
+        multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Editor
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_opening_agent_link_switches_to_editor_mode(cx: &mut TestAppContext) {
+        let (_panel, mut cx) = setup_visible_panel(cx).await;
+        let multi_workspace = cx.update(|window, _cx| {
+            window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .expect("test window should have a MultiWorkspace root")
+        });
+        let workspace = multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            multi_workspace.workspace().clone()
+        });
+
+        multi_workspace.update_in(&mut cx, |_, window, cx| {
+            crate::conversation_view::open_link(
+                "file.txt".into(),
+                &workspace.downgrade(),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Editor
+            );
+        });
+        workspace.read_with(&cx, |workspace, cx| {
+            let active_path = workspace
+                .active_item(cx)
+                .and_then(|item| item.project_path(cx))
+                .expect("file link should open in the Workspace");
+            assert_eq!(active_path.path.as_unix_str(), "file.txt");
+        });
     }
 
     #[gpui::test]
@@ -11918,6 +12221,15 @@ mod tests {
 
         panel.read_with(&cx, |panel, _cx| {
             assert_eq!(panel.active_terminal_id(), Some(second_terminal_id));
+        });
+        cx.update(|window, cx| {
+            let multi_workspace = window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .expect("test window should have a MultiWorkspace root");
+            multi_workspace.update(cx, |multi_workspace, cx| {
+                multi_workspace.close_sidebar(window, cx);
+            });
         });
         panel.update(&mut cx, |panel, cx| {
             panel.emit_test_terminal_bell(first_terminal_id, cx);

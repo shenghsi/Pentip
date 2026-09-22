@@ -935,6 +935,13 @@ impl Dock {
             .any(|entry| entry.panel.is_agent_panel(cx))
     }
 
+    pub fn agent_panel(&self, cx: &App) -> Option<Arc<dyn PanelHandle>> {
+        self.panel_entries
+            .iter()
+            .find(|entry| entry.panel.is_agent_panel(cx))
+            .map(|entry| entry.panel.clone())
+    }
+
     pub fn activate_panel(&mut self, panel_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if Some(panel_ix) != self.active_panel_index {
             self.restoration.discard_pending();
@@ -1393,6 +1400,23 @@ impl Render for PanelButtons {
         let active_index = dock.active_panel_index;
         let is_open = dock.is_open;
         let dock_position = dock.position;
+        let (agentic_layout, agent_mode) = window
+            .root::<crate::MultiWorkspace>()
+            .flatten()
+            .map(|multi_workspace| {
+                let multi_workspace = multi_workspace.read(cx);
+                let agentic_layout = multi_workspace.is_agentic_layout(cx);
+                (
+                    agentic_layout,
+                    agentic_layout && multi_workspace.agentic_mode() == crate::AgenticMode::Agent,
+                )
+            })
+            .unwrap_or_default();
+        let dock_is_hidden_for_agentic_editor = agentic_layout
+            && !agent_mode
+            && dock
+                .active_panel()
+                .is_some_and(|panel| panel.is_agent_panel(cx));
 
         let (menu_anchor, menu_attach) = match dock.position {
             DockPosition::Left => (Anchor::BottomLeft, Anchor::TopLeft),
@@ -1406,6 +1430,10 @@ impl Render for PanelButtons {
             .iter()
             .enumerate()
             .filter_map(|(i, entry)| {
+                let is_agent_panel = entry.panel.is_agent_panel(cx);
+                if agent_mode && !is_agent_panel {
+                    return None;
+                }
                 let icon = entry.panel.icon(window, cx)?;
                 let icon_tooltip = entry
                     .panel
@@ -1421,8 +1449,16 @@ impl Render for PanelButtons {
                 let dock_for_menu = dock_entity.clone();
                 let workspace_for_menu = workspace.clone();
 
-                let is_active_button = Some(i) == active_index && is_open;
-                let (action, tooltip) = if is_active_button {
+                let is_active_button = Some(i) == active_index
+                    && is_open
+                    && !(agentic_layout && is_agent_panel && !agent_mode);
+                let switches_agentic_mode = agentic_layout && is_agent_panel;
+                let (action, tooltip) = if switches_agentic_mode {
+                    (
+                        Box::new(crate::ToggleAgentMode) as Box<dyn Action>,
+                        icon_tooltip.into(),
+                    )
+                } else if Some(i) == active_index && is_open {
                     let action = dock.toggle_action();
 
                     let tooltip: SharedString =
@@ -1436,6 +1472,8 @@ impl Render for PanelButtons {
                 };
 
                 let focus_handle = dock.focus_handle(cx);
+                let focus_dock_before_action =
+                    !switches_agentic_mode && !dock_is_hidden_for_agentic_editor;
                 let icon_label = entry.panel.icon_label(window, cx);
 
                 Some(
@@ -1541,7 +1579,26 @@ impl Render for PanelButtons {
                                 .on_click({
                                     let action = action.boxed_clone();
                                     move |_, window, cx| {
-                                        window.focus(&focus_handle, cx);
+                                        if switches_agentic_mode {
+                                            if let Some(multi_workspace) =
+                                                window.root::<crate::MultiWorkspace>().flatten()
+                                            {
+                                                multi_workspace.update(
+                                                    cx,
+                                                    |multi_workspace, cx| {
+                                                        multi_workspace.toggle_agentic_mode(
+                                                            &crate::ToggleAgentMode,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                );
+                                            }
+                                            return;
+                                        }
+                                        if focus_dock_before_action {
+                                            window.focus(&focus_handle, cx);
+                                        }
                                         window.dispatch_action(action.boxed_clone(), cx)
                                     }
                                 })
@@ -1551,13 +1608,22 @@ impl Render for PanelButtons {
                                     })
                                 });
 
-                            div().relative().child(button).when_some(
-                                icon_label
-                                    .clone()
-                                    .filter(|_| !is_active_button)
-                                    .and_then(|label| label.parse::<usize>().ok()),
-                                |this, count| this.child(CountBadge::new(count)),
-                            )
+                            div()
+                                .relative()
+                                .when(is_agent_panel, |this| {
+                                    this.debug_selector(|| "agent-panel-status-button".to_string())
+                                })
+                                .when(name == "TestPanel", |this| {
+                                    this.debug_selector(|| "testpanel-status-button".to_string())
+                                })
+                                .child(button)
+                                .when_some(
+                                    icon_label
+                                        .clone()
+                                        .filter(|_| !is_active_button)
+                                        .and_then(|label| label.parse::<usize>().ok()),
+                                    |this, count| this.child(CountBadge::new(count)),
+                                )
                         }),
                 )
             })
@@ -1615,6 +1681,7 @@ pub mod test {
         pub default_size: Pixels,
         pub flexible: bool,
         pub activation_priority: u32,
+        pub icon: Option<ui::IconName>,
     }
     actions!(test_only, [ToggleTestPanel]);
 
@@ -1631,6 +1698,19 @@ pub mod test {
                 default_size: px(300.),
                 flexible: false,
                 activation_priority,
+                icon: None,
+            }
+        }
+
+        pub fn new_with_icon(
+            position: DockPosition,
+            activation_priority: u32,
+            icon: ui::IconName,
+            cx: &mut App,
+        ) -> Self {
+            Self {
+                icon: Some(icon),
+                ..Self::new(position, activation_priority, cx)
             }
         }
 
@@ -1725,11 +1805,11 @@ pub mod test {
         }
 
         fn icon(&self, _window: &Window, _: &App) -> Option<ui::IconName> {
-            None
+            self.icon
         }
 
         fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-            None
+            Some("Test Panel")
         }
 
         fn toggle_action(&self) -> Box<dyn Action> {
