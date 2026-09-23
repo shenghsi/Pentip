@@ -4579,20 +4579,21 @@ impl GitStore {
         mut cx: AsyncApp,
     ) -> Result<proto::GetTreeDiffResponse> {
         let repository_id = RepositoryId(request.payload.repository_id);
-        let diff_type = if request.payload.includes_worktree {
-            DiffTreeType::MergeBaseWithWorktree {
+        let diff_type = match (request.payload.is_merge, request.payload.includes_worktree) {
+            (true, true) => DiffTreeType::MergeBaseWithWorktree {
                 base: request.payload.base.into(),
-            }
-        } else if request.payload.is_merge {
-            DiffTreeType::MergeBase {
+            },
+            (false, true) => DiffTreeType::SinceWithWorktree {
                 base: request.payload.base.into(),
-                head: request.payload.head.into(),
-            }
-        } else {
-            DiffTreeType::Since {
+            },
+            (true, false) => DiffTreeType::MergeBase {
                 base: request.payload.base.into(),
                 head: request.payload.head.into(),
-            }
+            },
+            (false, false) => DiffTreeType::Since {
+                base: request.payload.base.into(),
+                head: request.payload.head.into(),
+            },
         };
 
         let diff = this
@@ -9371,6 +9372,9 @@ impl Repository {
                             (true, true, base, "HEAD".into())
                         }
                         DiffTreeType::Since { base, head } => (false, false, base, head),
+                        DiffTreeType::SinceWithWorktree { base } => {
+                            (false, true, base, "HEAD".into())
+                        }
                     };
                     let response = client
                         .request(proto::GetTreeDiff {
