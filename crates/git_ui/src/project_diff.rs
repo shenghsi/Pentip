@@ -57,8 +57,19 @@ actions!(
         LeaderAndFollower,
         /// Compare with a specific branch
         CompareWithBranch,
+        /// Compare working tree with a specific branch
+        CompareWorkingTreeWithBranch,
+        /// Compare working tree with a commit, chosen from a commit picker
+        CompareWorkingTreeWithCommit,
     ]
 );
+
+/// Compare working tree with a specific commit
+#[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = git)]
+pub struct CompareWorkingTreeWithSpecificCommit {
+    pub sha: String,
+}
 
 /// Shows the diff between the working directory and your default
 /// branch (typically main or master).

@@ -1921,8 +1921,11 @@ impl GitRepository for RealGitRepository {
     fn diff_tree(&self, request: DiffTreeType) -> BoxFuture<'_, Result<TreeDiff>> {
         let git = self.git_binary_in_worktree();
         let working_directory = self.working_directory.clone();
+        // Whether the "recreated file" correction below needs to resolve `base` as a
+        // merge-base with HEAD first, or can use it directly as the diff base commit.
         let merge_base_ref = match &request {
-            DiffTreeType::MergeBaseWithWorktree { base } => Some(base.clone()),
+            DiffTreeType::MergeBaseWithWorktree { base } => Some((base.clone(), true)),
+            DiffTreeType::SinceWithWorktree { base } => Some((base.clone(), false)),
             DiffTreeType::MergeBase { .. } | DiffTreeType::Since { .. } => None,
         };
 
@@ -1964,6 +1967,16 @@ impl GitRepository for RealGitRepository {
             ]
             .map(OsString::from)
             .to_vec(),
+            DiffTreeType::SinceWithWorktree { base } => [
+                "diff",
+                "--raw",
+                "-z",
+                "--abbrev=64",
+                "--no-renames",
+                base.as_str(),
+            ]
+            .map(OsString::from)
+            .to_vec(),
         };
 
         self.executor
@@ -1977,7 +1990,7 @@ impl GitRepository for RealGitRepository {
 
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let mut tree_diff = stdout.parse::<TreeDiff>()?;
-                let Some(merge_base_ref) = merge_base_ref else {
+                let Some((merge_base_ref, resolve_merge_base)) = merge_base_ref else {
                     return Ok(tree_diff);
                 };
                 let Some(working_directory) = working_directory else {
@@ -2023,16 +2036,22 @@ impl GitRepository for RealGitRepository {
                     return Ok(tree_diff);
                 }
 
-                let merge_base_output = git
-                    .build_command(&["merge-base", merge_base_ref.as_ref(), "HEAD"])
-                    .output()
-                    .await?;
-                if !merge_base_output.status.success() {
-                    let stderr = String::from_utf8_lossy(&merge_base_output.stderr);
-                    anyhow::bail!("git merge-base failed: {stderr}");
-                }
-                let merge_base = String::from_utf8_lossy(&merge_base_output.stdout);
-                let merge_base = merge_base.trim();
+                let merge_base = if resolve_merge_base {
+                    let merge_base_output = git
+                        .build_command(&["merge-base", merge_base_ref.as_ref(), "HEAD"])
+                        .output()
+                        .await?;
+                    if !merge_base_output.status.success() {
+                        let stderr = String::from_utf8_lossy(&merge_base_output.stderr);
+                        anyhow::bail!("git merge-base failed: {stderr}");
+                    }
+                    String::from_utf8_lossy(&merge_base_output.stdout)
+                        .trim()
+                        .to_string()
+                } else {
+                    merge_base_ref.to_string()
+                };
+                let merge_base = merge_base.as_str();
 
                 for (path, old) in recreated {
                     let full_path = working_directory.join(path.as_std_path());
@@ -4500,6 +4519,63 @@ mod tests {
         assert_eq!(
             repository
                 .diff_tree(DiffTreeType::MergeBaseWithWorktree {
+                    base: "HEAD^".into(),
+                })
+                .await
+                .unwrap(),
+            TreeDiff {
+                entries: HashMap::from_iter([(
+                    RepoPath::new("file.txt").unwrap(),
+                    TreeDiffStatus::Modified { old: base_oid },
+                )]),
+            }
+        );
+    }
+
+    #[gpui::test]
+    async fn test_since_worktree_diff_handles_recreated_index_deletion(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        git_init_repo(repo_dir.path());
+        let file_path = repo_dir.path().join("file.txt");
+        fs::write(&file_path, "base\n").unwrap();
+        git_command(repo_dir.path(), ["add", "file.txt"]);
+        git_command(repo_dir.path(), ["commit", "-m", "base"]);
+        let base_oid = git_command_output(repo_dir.path(), ["rev-parse", "HEAD:file.txt"])
+            .parse()
+            .unwrap();
+
+        fs::write(&file_path, "head\n").unwrap();
+        git_command(repo_dir.path(), ["add", "file.txt"]);
+        git_command(repo_dir.path(), ["commit", "-m", "head"]);
+        git_command(repo_dir.path(), ["rm", "--cached", "file.txt"]);
+        fs::write(&file_path, "base\n").unwrap();
+
+        let repository = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+        assert_eq!(
+            repository
+                .diff_tree(DiffTreeType::SinceWithWorktree {
+                    base: "HEAD^".into(),
+                })
+                .await
+                .unwrap(),
+            TreeDiff {
+                entries: HashMap::default(),
+            }
+        );
+
+        fs::write(&file_path, "worktree\n").unwrap();
+        assert_eq!(
+            repository
+                .diff_tree(DiffTreeType::SinceWithWorktree {
                     base: "HEAD^".into(),
                 })
                 .await

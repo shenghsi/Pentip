@@ -37,6 +37,7 @@ pub mod branch_diff;
 pub mod branch_picker;
 mod commit_context_menu;
 mod commit_modal;
+pub mod commit_picker;
 pub mod commit_tooltip;
 pub mod commit_view;
 mod conflict_view;
