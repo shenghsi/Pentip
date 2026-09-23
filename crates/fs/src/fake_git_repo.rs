@@ -210,8 +210,11 @@ impl GitRepository for FakeGitRepository {
     }
 
     fn diff_tree(&self, request: DiffTreeType) -> BoxFuture<'_, Result<TreeDiff>> {
-        let worktree_contents =
-            matches!(request, DiffTreeType::MergeBaseWithWorktree { .. }).then(|| {
+        let worktree_contents = matches!(
+            request,
+            DiffTreeType::MergeBaseWithWorktree { .. } | DiffTreeType::SinceWithWorktree { .. }
+        )
+        .then(|| {
                 let workdir_path = self.dot_git_path.parent().unwrap();
                 self.fs
                     .files()

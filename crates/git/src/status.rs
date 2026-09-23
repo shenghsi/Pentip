@@ -510,6 +510,11 @@ pub enum DiffTreeType {
         base: SharedString,
         head: SharedString,
     },
+    /// Diffs the working tree directly against `base`, with no merge-base resolution
+    /// (a plain two-dot diff, as opposed to [`DiffTreeType::MergeBaseWithWorktree`]'s three-dot diff).
+    SinceWithWorktree {
+        base: SharedString,
+    },
 }
 
 #[derive(Debug, PartialEq)]

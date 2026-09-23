@@ -1,4 +1,5 @@
 use crate::commit_view::CommitView;
+use crate::project_diff::CompareWorkingTreeWithSpecificCommit;
 use git::Oid;
 use gpui::{Action, ClipboardItem, Entity, FocusHandle, SharedString, WeakEntity, Window, actions};
 use project::{GIT_COMMAND_TASK_TAG, git_store::Repository};
@@ -82,6 +83,18 @@ pub(crate) fn commit_context_menu(
                 Some(CopyCommitSha.boxed_clone()),
                 move |_window, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(sha.to_string()));
+                },
+            )
+            .entry(
+                "Compare Working Tree with Commit",
+                None,
+                move |window, cx| {
+                    window.dispatch_action(
+                        Box::new(CompareWorkingTreeWithSpecificCommit {
+                            sha: sha.to_string(),
+                        }),
+                        cx,
+                    );
                 },
             )
             .when_some(ref_name.clone(), |menu, ref_name| {
