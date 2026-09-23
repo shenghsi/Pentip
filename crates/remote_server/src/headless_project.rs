@@ -291,6 +291,19 @@ impl HeadlessProject {
 
         session.add_request_handler(cx.weak_entity(), Self::handle_list_remote_directory);
         session.add_request_handler(cx.weak_entity(), Self::handle_get_path_metadata);
+        session.add_request_handler(cx.weak_entity(), Self::handle_get_remote_agent_history);
+        session.add_request_handler(
+            cx.weak_entity(),
+            Self::handle_get_managed_agent_installation,
+        );
+        session.add_request_handler(
+            cx.weak_entity(),
+            Self::handle_stage_managed_agent_installation,
+        );
+        session.add_request_handler(
+            cx.weak_entity(),
+            Self::handle_commit_managed_agent_installation,
+        );
         session.add_request_handler(cx.weak_entity(), Self::handle_shutdown_remote_server);
         session.add_request_handler(cx.weak_entity(), Self::handle_ping);
         session.add_request_handler(cx.weak_entity(), Self::handle_get_processes);
@@ -1199,6 +1212,104 @@ impl HeadlessProject {
             is_dir,
             path: expanded.to_string_lossy().into_owned(),
         })
+    }
+
+    async fn handle_get_remote_agent_history(
+        _this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GetRemoteAgentHistory>,
+        cx: AsyncApp,
+    ) -> Result<proto::GetRemoteAgentHistoryResponse> {
+        let request = envelope.payload;
+        cx.background_spawn(async move {
+            let history_root = if request.history_root.is_empty() {
+                paths::home_dir().join(match request.agent.as_str() {
+                    "codex" => ".codex",
+                    "claude" => ".claude",
+                    _ => anyhow::bail!("unsupported agent history kind"),
+                })
+            } else {
+                PathBuf::from(shellexpand::tilde(&request.history_root).to_string())
+            };
+            let project_paths = request
+                .project_paths
+                .into_iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+            let sessions = match request.agent.as_str() {
+                "codex" => {
+                    agent::codex_thread_history::load_history(&history_root, &project_paths)?
+                        .into_iter()
+                        .map(|session| proto::RemoteAgentHistoryEntry {
+                            id: session.id.to_string(),
+                            title: session.title,
+                            working_directory: session
+                                .working_directory
+                                .to_string_lossy()
+                                .into_owned(),
+                            timestamp_seconds: session.created_at.timestamp(),
+                            archived: session.archived,
+                        })
+                        .collect()
+                }
+                "claude" => {
+                    agent::claude_thread_history::load_history(&history_root, &project_paths)?
+                        .into_iter()
+                        .map(|session| proto::RemoteAgentHistoryEntry {
+                            id: session.id.to_string(),
+                            title: session.title,
+                            working_directory: session
+                                .working_directory
+                                .to_string_lossy()
+                                .into_owned(),
+                            timestamp_seconds: session.updated_at.timestamp(),
+                            archived: false,
+                        })
+                        .collect()
+                }
+                _ => anyhow::bail!("unsupported agent history kind"),
+            };
+            Ok(proto::GetRemoteAgentHistoryResponse { sessions })
+        })
+        .await
+    }
+
+    async fn handle_get_managed_agent_installation(
+        _this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GetManagedAgentInstallation>,
+        cx: AsyncApp,
+    ) -> Result<proto::GetManagedAgentInstallationResponse> {
+        let agent = envelope.payload.agent;
+        cx.background_spawn(async move { crate::remote_agent_install::current(&agent) })
+            .await
+    }
+
+    async fn handle_stage_managed_agent_installation(
+        _this: Entity<Self>,
+        envelope: TypedEnvelope<proto::StageManagedAgentInstallation>,
+        cx: AsyncApp,
+    ) -> Result<proto::StageManagedAgentInstallationResponse> {
+        let request = envelope.payload;
+        cx.background_spawn(async move {
+            crate::remote_agent_install::stage(&request.agent, &request.version)
+        })
+        .await
+    }
+
+    async fn handle_commit_managed_agent_installation(
+        _this: Entity<Self>,
+        envelope: TypedEnvelope<proto::CommitManagedAgentInstallation>,
+        cx: AsyncApp,
+    ) -> Result<proto::CommitManagedAgentInstallationResponse> {
+        let request = envelope.payload;
+        cx.background_spawn(async move {
+            crate::remote_agent_install::commit(
+                &request.agent,
+                &request.version,
+                &request.stage_id,
+                &request.sha256,
+            )
+        })
+        .await
     }
 
     async fn handle_shutdown_remote_server(

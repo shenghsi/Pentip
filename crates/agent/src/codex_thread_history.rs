@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 #[derive(Clone, Debug)]
-pub(crate) struct CodexSession {
+pub struct CodexSession {
     pub id: uuid::Uuid,
     pub title: String,
     pub working_directory: PathBuf,
@@ -30,7 +30,7 @@ impl CodexSession {
     }
 }
 
-pub(crate) fn load_history(
+pub fn load_history(
     codex_home: &Path,
     project_paths: &[PathBuf],
 ) -> anyhow::Result<Vec<CodexSession>> {

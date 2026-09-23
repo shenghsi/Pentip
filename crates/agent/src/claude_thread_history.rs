@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 #[derive(Clone, Debug)]
-pub(crate) struct ClaudeSession {
+pub struct ClaudeSession {
     pub id: uuid::Uuid,
     pub title: String,
     pub working_directory: PathBuf,
@@ -28,7 +28,7 @@ impl ClaudeSession {
     }
 }
 
-pub(crate) fn load_history(
+pub fn load_history(
     claude_home: &Path,
     project_paths: &[PathBuf],
 ) -> anyhow::Result<Vec<ClaudeSession>> {

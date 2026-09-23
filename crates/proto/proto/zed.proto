@@ -507,7 +507,15 @@ message Envelope {
     RefreshFoldingRanges refresh_folding_ranges = 476;
     RefreshDocumentSymbols refresh_document_symbols = 477;
     BlameBufferAtRevision blame_buffer_at_revision = 478;
-    BlameBufferAtRevisionResponse blame_buffer_at_revision_response = 479; // current max
+    BlameBufferAtRevisionResponse blame_buffer_at_revision_response = 479;
+    GetRemoteAgentHistory get_remote_agent_history = 480;
+    GetRemoteAgentHistoryResponse get_remote_agent_history_response = 481;
+    GetManagedAgentInstallation get_managed_agent_installation = 482;
+    GetManagedAgentInstallationResponse get_managed_agent_installation_response = 483;
+    StageManagedAgentInstallation stage_managed_agent_installation = 484;
+    StageManagedAgentInstallationResponse stage_managed_agent_installation_response = 485;
+    CommitManagedAgentInstallation commit_managed_agent_installation = 486;
+    CommitManagedAgentInstallationResponse commit_managed_agent_installation_response = 487; // current max
   }
 
   reserved 87 to 88;

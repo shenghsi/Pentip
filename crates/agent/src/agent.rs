@@ -1,3 +1,5 @@
+pub mod claude_thread_history;
+pub mod codex_thread_history;
 mod db;
 mod legacy_thread;
 mod native_agent_server;

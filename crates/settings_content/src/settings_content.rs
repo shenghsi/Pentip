@@ -1328,6 +1328,62 @@ pub struct SshConnection {
     /// Timeout in seconds for SSH connection and downloading the remote server binary.
     /// Defaults to 10 seconds if not specified.
     pub connection_timeout: Option<u16>,
+    pub agent_route: Option<RemoteAgentRoute>,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema, MergeFrom,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteAgentRoute {
+    Tunneled,
+    #[default]
+    Direct,
+}
+
+impl RemoteAgentRoute {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "Direct",
+            Self::Tunneled => "Tunneled",
+        }
+    }
+}
+
+impl SshConnection {
+    pub fn effective_agent_route(&self) -> RemoteAgentRoute {
+        self.agent_route.unwrap_or_default()
+    }
+
+    pub fn should_upload_binary_over_ssh(&self) -> bool {
+        self.upload_binary_over_ssh.unwrap_or_default()
+            || self.effective_agent_route() == RemoteAgentRoute::Tunneled
+    }
+}
+
+#[cfg(test)]
+mod remote_agent_route_tests {
+    use super::*;
+
+    #[test]
+    fn ssh_agent_route_defaults_to_direct_and_accepts_tunneled() {
+        let direct: SshConnection =
+            serde_json::from_str(r#"{"host":"build.example.com"}"#).expect("valid connection");
+        assert_eq!(direct.effective_agent_route(), RemoteAgentRoute::Direct);
+
+        let tunneled: SshConnection =
+            serde_json::from_str(r#"{"host":"build.example.com","agent_route":"tunneled"}"#)
+                .expect("valid tunneled connection");
+        assert_eq!(tunneled.effective_agent_route(), RemoteAgentRoute::Tunneled);
+        assert!(tunneled.should_upload_binary_over_ssh());
+
+        let direct_upload: SshConnection = serde_json::from_str(
+            r#"{"host":"build.example.com","agent_route":"direct","upload_binary_over_ssh":true}"#,
+        )
+        .expect("valid direct connection with SSH upload");
+        assert!(direct_upload.should_upload_binary_over_ssh());
+        assert!(!direct.should_upload_binary_over_ssh());
+    }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, JsonSchema, MergeFrom, Debug)]

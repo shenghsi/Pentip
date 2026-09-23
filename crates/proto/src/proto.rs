@@ -114,6 +114,14 @@ messages!(
     (GetCrashFilesResponse, Background),
     (GetPathMetadata, Background),
     (GetPathMetadataResponse, Background),
+    (GetRemoteAgentHistory, Background),
+    (GetRemoteAgentHistoryResponse, Background),
+    (GetManagedAgentInstallation, Background),
+    (GetManagedAgentInstallationResponse, Background),
+    (StageManagedAgentInstallation, Background),
+    (StageManagedAgentInstallationResponse, Background),
+    (CommitManagedAgentInstallation, Background),
+    (CommitManagedAgentInstallationResponse, Background),
     (GetPermalinkToLine, Foreground),
     (GetProcesses, Background),
     (GetProcessesResponse, Background),
@@ -564,6 +572,19 @@ request_messages!(
     (ActiveToolchain, ActiveToolchainResponse),
     (ResolveToolchain, ResolveToolchainResponse),
     (GetPathMetadata, GetPathMetadataResponse),
+    (GetRemoteAgentHistory, GetRemoteAgentHistoryResponse),
+    (
+        GetManagedAgentInstallation,
+        GetManagedAgentInstallationResponse
+    ),
+    (
+        StageManagedAgentInstallation,
+        StageManagedAgentInstallationResponse
+    ),
+    (
+        CommitManagedAgentInstallation,
+        CommitManagedAgentInstallationResponse
+    ),
     (GetCrashFiles, GetCrashFilesResponse),
     (CancelLanguageServerWork, Ack),
     (SyncExtensions, SyncExtensionsResponse),

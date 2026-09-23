@@ -29,8 +29,8 @@ use remote::{
     remote_client::ConnectionIdentifier,
 };
 use settings::{
-    RemoteProject, RemoteSettingsContent, Settings as _, SettingsStore, update_settings_file,
-    watch_config_file,
+    RemoteAgentRoute, RemoteProject, RemoteSettingsContent, Settings as _, SettingsStore,
+    update_settings_file, watch_config_file,
 };
 use std::{
     borrow::Cow,
@@ -771,7 +771,8 @@ enum ViewServerOptionsState {
     Ssh {
         connection: SshConnectionOptions,
         server_index: SshServerIndex,
-        entries: [NavigableEntry; 4],
+        agent_route: RemoteAgentRoute,
+        entries: [NavigableEntry; 5],
     },
     Wsl {
         connection: WslConnectionOptions,
@@ -1742,6 +1743,11 @@ impl RemoteServerProjects {
                 ViewServerOptionsState::Ssh {
                     connection,
                     server_index,
+                    agent_route: RemoteSettings::get_global(cx)
+                        .ssh_connections()
+                        .nth(server_index.0)
+                        .map(|saved| saved.effective_agent_route())
+                        .unwrap_or_default(),
                     entries: std::array::from_fn(|_| NavigableEntry::focusable(cx)),
                 }
             }
@@ -2055,6 +2061,29 @@ impl RemoteServerProjects {
         });
     }
 
+    fn set_ssh_agent_route(
+        &mut self,
+        server: SshServerIndex,
+        route: RemoteAgentRoute,
+        cx: &mut Context<Self>,
+    ) {
+        if let Mode::ViewServerOptions(ViewServerOptionsState::Ssh { agent_route, .. }) =
+            &mut self.mode
+        {
+            *agent_route = route;
+        }
+        self.update_settings_file(cx, move |setting, _| {
+            if let Some(connection) = setting
+                .ssh_connections
+                .as_mut()
+                .and_then(|connections| connections.get_mut(server.0))
+            {
+                connection.agent_route = Some(route);
+            }
+        });
+        cx.notify();
+    }
+
     fn delete_remote_project(
         &mut self,
         server: ServerIndex,
@@ -2134,6 +2163,7 @@ impl RemoteServerProjects {
                     upload_binary_over_ssh: None,
                     port_forwards: connection_options.port_forwards,
                     connection_timeout: connection_options.connection_timeout,
+                    agent_route: None,
                 })
         });
     }
@@ -2614,9 +2644,11 @@ impl RemoteServerProjects {
                                 connection,
                                 entries,
                                 server_index,
+                                agent_route,
                             } => this.child(self.render_edit_ssh(
                                 connection,
                                 *server_index,
+                                *agent_route,
                                 entries,
                                 window,
                                 cx,
@@ -2744,6 +2776,7 @@ impl RemoteServerProjects {
         &self,
         connection: &SshConnectionOptions,
         index: SshServerIndex,
+        agent_route: RemoteAgentRoute,
         entries: &[NavigableEntry],
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2835,6 +2868,33 @@ impl RemoteServerProjects {
                     )
             })
             .child({
+                let next_route = match agent_route {
+                    RemoteAgentRoute::Direct => RemoteAgentRoute::Tunneled,
+                    RemoteAgentRoute::Tunneled => RemoteAgentRoute::Direct,
+                };
+                div()
+                    .id("ssh-options-agent-route")
+                    .track_focus(&entries[2].focus_handle)
+                    .on_action(cx.listener(move |this, _: &menu::Confirm, _, cx| {
+                        this.set_ssh_agent_route(index, next_route, cx);
+                    }))
+                    .child(
+                        ListItem::new("agent-route")
+                            .toggle_state(entries[2].focus_handle.contains_focused(window, cx))
+                            .inset(true)
+                            .spacing(ui::ListItemSpacing::Sparse)
+                            .start_slot(Icon::new(IconName::Settings).color(Color::Muted))
+                            .child(Label::new("Agent Connection"))
+                            .end_slot(Label::new(agent_route.label()).color(Color::Muted))
+                            .tooltip(Tooltip::text(
+                                "Direct uses the remote device's internet. Tunneled uses this computer's internet.",
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_ssh_agent_route(index, next_route, cx);
+                            })),
+                    )
+            })
+            .child({
                 fn remove_ssh_server(
                     remote_servers: Entity<RemoteServerProjects>,
                     index: SshServerIndex,
@@ -2867,8 +2927,8 @@ impl RemoteServerProjects {
                     .detach_and_log_err(cx);
                 }
                 div()
-                    .id("ssh-options-copy-server-address")
-                    .track_focus(&entries[2].focus_handle)
+                    .id("ssh-options-remove-server")
+                    .track_focus(&entries[3].focus_handle)
                     .on_action(cx.listener({
                         let connection_string = connection_string.clone();
                         move |_, _: &menu::Confirm, window, cx| {
@@ -2884,7 +2944,7 @@ impl RemoteServerProjects {
                     }))
                     .child(
                         ListItem::new("remove-server")
-                            .toggle_state(entries[2].focus_handle.contains_focused(window, cx))
+                            .toggle_state(entries[3].focus_handle.contains_focused(window, cx))
                             .inset(true)
                             .spacing(ui::ListItemSpacing::Sparse)
                             .start_slot(Icon::new(IconName::Trash).color(Color::Error))

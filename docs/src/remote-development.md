@@ -18,6 +18,19 @@ Remote development requires two computers, your local machine that runs the Zed 
 
 On your local machine, Zed runs its UI, talks to language models, uses Tree-sitter to parse and syntax-highlight code, and stores unsaved changes and recent projects. The source code, language servers, tasks, and the terminal all run on the remote server. [AI features](./ai/overview.md) work in remote sessions, including the Agent Panel and Inline Assistant.
 
+For Codex CLI and Claude Code Terminal Threads, open an SSH server's options and
+set **Agent Connection** to **Direct** or **Tunneled**. Direct is the default. It
+uses an agent installed on the remote device and sends agent traffic from that
+device. Tunneled is for a POSIX SSH host that cannot reach the internet. In
+Tunneled mode, Pentip checks for a new agent release on the local machine. It
+asks before it downloads and uploads an agent or updates an installed version.
+You can keep the installed version. Pentip checks the download checksum before
+upload. Pentip also downloads `zed-remote-server` locally and uploads it over
+SSH when the server binary is needed. Agent traffic uses an SSH reverse port
+forward to a local proxy. The choice applies to new Terminal Threads. Session
+history stays on the remote device and appears in Thread History when you open
+that remote project.
+
 > **Note:** The original version of remote development sent traffic via Zed's servers. As of Zed v0.157 you can no longer use that mode.
 
 ## Setup
@@ -72,7 +85,7 @@ Zed shells out to the `ssh` on your path, and so it will inherit any configurati
 }
 ```
 
-There are two additional Zed-specific options per connection, `upload_binary_over_ssh` and `nickname`:
+There are two additional Zed-specific options per connection, `upload_binary_over_ssh` and `nickname`. Direct defaults to `false` for SSH upload. Tunneled uses SSH upload automatically. An explicit `true` setting also works with Direct:
 
 ```json [settings]
 {
@@ -222,7 +235,7 @@ Any prompts that SSH needs will be shown in the UI, so you can verify host keys,
 
 Once the master connection is established, Zed will check to see if the remote server binary is present in `~/.zed_server` on the remote, and that its version matches the current version of Zed that you're using.
 
-If it is not there or the version mismatches, Zed will try to download the latest version. By default, it will download from `https://zed.dev` directly, but if you set: `{"upload_binary_over_ssh":true}` in your settings for that server, it will download the binary to your local machine and then upload it to the remote server.
+If it is not there or the version mismatches, Zed will try to download the latest version. With Direct, it tries to download from `https://zed.dev` on the remote device, then falls back to a local download and SSH upload if that fails. With Tunneled, it downloads locally and uploads over SSH without the remote download attempt. You can also set `{"upload_binary_over_ssh":true}` for a Direct connection to use local download and SSH upload.
 
 If you'd like to maintain the server binary yourself you can. You can either download our prebuilt versions from [GitHub](https://github.com/zed-industries/zed/releases), or [build your own](https://zed.dev/docs/development):
 
