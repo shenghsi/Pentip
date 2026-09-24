@@ -383,6 +383,8 @@ pub struct PanelSizeState {
 
 struct PanelEntry {
     panel: Arc<dyn PanelHandle>,
+    // Cached so that `agent_panel` can run while a panel is being updated, where reading the entity would panic.
+    is_agent_panel: bool,
     size_state: PanelSizeState,
     _subscriptions: [Subscription; 4],
 }
@@ -804,11 +806,13 @@ impl Dock {
             *active_index += 1;
         }
         let size_state = panel.read(cx).initial_size_state(window, cx);
+        let is_agent_panel = panel.read(cx).is_agent_panel();
 
         self.panel_entries.insert(
             index,
             PanelEntry {
                 panel: Arc::new(panel.clone()),
+                is_agent_panel,
                 size_state,
                 _subscriptions: subscriptions,
             },
@@ -929,16 +933,14 @@ impl Dock {
         self.panel_entries.len()
     }
 
-    pub fn has_agent_panel(&self, cx: &App) -> bool {
-        self.panel_entries
-            .iter()
-            .any(|entry| entry.panel.is_agent_panel(cx))
+    pub fn has_agent_panel(&self) -> bool {
+        self.panel_entries.iter().any(|entry| entry.is_agent_panel)
     }
 
-    pub fn agent_panel(&self, cx: &App) -> Option<Arc<dyn PanelHandle>> {
+    pub fn agent_panel(&self) -> Option<Arc<dyn PanelHandle>> {
         self.panel_entries
             .iter()
-            .find(|entry| entry.panel.is_agent_panel(cx))
+            .find(|entry| entry.is_agent_panel)
             .map(|entry| entry.panel.clone())
     }
 

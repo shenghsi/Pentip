@@ -2246,7 +2246,7 @@ impl Workspace {
     pub fn agent_panel_handle(&self, cx: &App) -> Option<Arc<dyn PanelHandle>> {
         self.all_docks()
             .into_iter()
-            .find_map(|dock| dock.read(cx).agent_panel(cx))
+            .find_map(|dock| dock.read(cx).agent_panel())
     }
 
     fn agentic_panel_preserving_dock<T: Panel>(&self, cx: &App) -> Option<Entity<T>> {
@@ -2435,7 +2435,7 @@ impl Workspace {
     pub fn agent_panel_position(&self, cx: &App) -> Option<DockPosition> {
         self.all_docks().into_iter().find_map(|dock| {
             let dock = dock.read(cx);
-            dock.has_agent_panel(cx).then_some(dock.position())
+            dock.has_agent_panel().then_some(dock.position())
         })
     }
 
