@@ -1,8 +1,8 @@
+#[cfg(not(windows))]
+use crate::remote_client::RemotePortForward;
 use crate::{
     RemoteArch, RemoteClientDelegate, RemoteOs, RemotePlatform,
-    remote_client::{
-        CommandTemplate, Interactive, RemoteConnection, RemoteConnectionOptions, RemotePortForward,
-    },
+    remote_client::{CommandTemplate, Interactive, RemoteConnection, RemoteConnectionOptions},
     transport::{parse_platform, parse_shell},
 };
 use anyhow::{Context as _, Result, anyhow};
@@ -13,7 +13,9 @@ use futures::{
     channel::mpsc::{Sender, UnboundedReceiver, UnboundedSender},
     select_biased,
 };
-use gpui::{App, AppContext as _, AsyncApp, BackgroundExecutor, Task};
+#[cfg(not(windows))]
+use gpui::BackgroundExecutor;
+use gpui::{App, AppContext as _, AsyncApp, Task};
 use parking_lot::Mutex;
 use paths::remote_server_dir_relative;
 use release_channel::{AppVersion, ReleaseChannel};
@@ -41,6 +43,7 @@ use util::{
 /// How long to wait for SSH to connect when no askpass prompt has opened.
 const SSH_CONNECTION_PROMPT_TIMEOUT: Duration = Duration::from_secs(17);
 
+#[cfg(not(windows))]
 fn parse_allocated_remote_forward_port(output: &str) -> Option<u16> {
     let port = output.trim().parse::<u16>().ok().or_else(|| {
         output.lines().find_map(|line| {
@@ -55,7 +58,7 @@ fn parse_allocated_remote_forward_port(output: &str) -> Option<u16> {
     (port != 0).then_some(port)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod remote_agent_forward_tests {
     use super::parse_allocated_remote_forward_port;
 
