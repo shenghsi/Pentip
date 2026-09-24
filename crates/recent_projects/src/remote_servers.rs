@@ -40,8 +40,9 @@ use std::{
 };
 
 use ui::{
-    CommonAnimationExt, HighlightedLabel, IconButtonShape, KeyBinding, ListItem, ListSeparator,
-    ModalHeader, Navigable, NavigableEntry, Tooltip, prelude::*,
+    CommonAnimationExt, ContextMenu, DropdownMenu, DropdownStyle, HighlightedLabel,
+    IconButtonShape, KeyBinding, ListItem, ListSeparator, ModalHeader, Navigable, NavigableEntry,
+    Tooltip, prelude::*,
 };
 use util::{
     ResultExt,
@@ -71,6 +72,7 @@ pub struct RemoteServerProjects {
 struct CreateRemoteServer {
     address_editor: Entity<Editor>,
     address_error: Option<SharedString>,
+    agent_route: RemoteAgentRoute,
     ssh_prompt: Option<Entity<RemoteConnectionPrompt>>,
     _creating: Option<Task<Option<()>>>,
 }
@@ -84,6 +86,7 @@ impl CreateRemoteServer {
         Self {
             address_editor,
             address_error: None,
+            agent_route: RemoteAgentRoute::Direct,
             ssh_prompt: None,
             _creating: None,
         }
@@ -680,6 +683,12 @@ impl RemoteEntry {
 }
 
 #[derive(Clone)]
+enum AgentRouteTarget {
+    Saved(SshServerIndex),
+    SshConfig(SharedString),
+}
+
+#[derive(Clone)]
 struct DefaultState {
     servers: Vec<RemoteEntry>,
     /// `None` when no filter is active; `Some` carries the fuzzy match results
@@ -995,9 +1004,26 @@ impl RemoteServerPickerDelegate {
         &self,
         server_index: usize,
         host_positions: &[usize],
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
     ) -> Option<AnyElement> {
         let server = self.state.servers.get(server_index)?;
         let connection = server.connection().into_owned();
+        let agent_route = match server {
+            RemoteEntry::Project {
+                connection: Connection::Ssh(connection),
+                index: ServerIndex::Ssh(index),
+                ..
+            } => Some((
+                connection.effective_agent_route(),
+                AgentRouteTarget::Saved(*index),
+            )),
+            RemoteEntry::SshConfig { host } => Some((
+                RemoteAgentRoute::Direct,
+                AgentRouteTarget::SshConfig(host.clone()),
+            )),
+            _ => None,
+        };
         let (main_label, aux_label, is_wsl) = match &connection {
             Connection::Ssh(connection) => {
                 if let Some(nickname) = connection.nickname.clone() {
@@ -1040,6 +1066,50 @@ impl RemoteServerPickerDelegate {
                     aux_label
                         .map(|label| Label::new(label).size(LabelSize::Small).color(Color::Muted)),
                 )
+                .when_some(agent_route, |this, (selected_route, target)| {
+                    let remote_server_projects = self.remote_server_projects.clone();
+                    let menu = ContextMenu::build(window, cx, move |mut menu, _, _| {
+                        for route in [RemoteAgentRoute::Direct, RemoteAgentRoute::Tunneled] {
+                            let remote_server_projects = remote_server_projects.clone();
+                            let target = target.clone();
+                            menu = menu.toggleable_entry(
+                                route.label(),
+                                route == selected_route,
+                                ui::IconPosition::Start,
+                                None,
+                                move |_, cx| {
+                                    if route == selected_route {
+                                        return;
+                                    }
+                                    remote_server_projects
+                                        .update(cx, |this, cx| match &target {
+                                            AgentRouteTarget::Saved(index) => {
+                                                this.set_ssh_agent_route(*index, route, cx);
+                                            }
+                                            AgentRouteTarget::SshConfig(host) => {
+                                                this.create_host_from_ssh_config(host, route, cx);
+                                            }
+                                        })
+                                        .log_err();
+                                },
+                            );
+                        }
+                        menu
+                    });
+                    this.child(
+                        div().ml_auto().child(
+                            DropdownMenu::new(
+                                ("remote-agent-route", server_index),
+                                format!("Agent: {}", selected_route.label()),
+                                menu,
+                            )
+                            .style(DropdownStyle::Ghost)
+                            .trigger_tooltip(Tooltip::text(
+                                "Choose how supported agents on this server reach their provider.",
+                            )),
+                        ),
+                    )
+                })
                 .into_any_element(),
         )
     }
@@ -1216,7 +1286,11 @@ impl PickerDelegate for RemoteServerPickerDelegate {
                         let connection = server_entry.connection().into_owned();
                         remote_server_projects
                             .update(cx, |this, cx| {
-                                let new_ix = this.create_host_from_ssh_config(&host, cx);
+                                let new_ix = this.create_host_from_ssh_config(
+                                    &host,
+                                    RemoteAgentRoute::Direct,
+                                    cx,
+                                );
                                 this.create_remote_project(
                                     new_ix.into(),
                                     connection.into(),
@@ -1252,7 +1326,7 @@ impl PickerDelegate for RemoteServerPickerDelegate {
         &self,
         ix: usize,
         selected: bool,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) -> Option<Self::ListItem> {
         let entry = self.matches.get(ix)?;
@@ -1261,7 +1335,7 @@ impl PickerDelegate for RemoteServerPickerDelegate {
             RemoteMatch::ServerHeader {
                 server,
                 host_positions,
-            } => self.render_server_header(*server, host_positions),
+            } => self.render_server_header(*server, host_positions, window, cx),
             RemoteMatch::AddServer => {
                 Some(self.render_action_item(ix, IconName::Plus, "Connect SSH Server", selected))
             }
@@ -1577,6 +1651,7 @@ impl RemoteServerProjects {
     fn create_ssh_server(
         &mut self,
         editor: Entity<Editor>,
+        agent_route: RemoteAgentRoute,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1585,18 +1660,22 @@ impl RemoteServerProjects {
             return;
         }
 
-        let connection_options = match SshConnectionOptions::parse_command_line(&input) {
+        let mut connection_options = match SshConnectionOptions::parse_command_line(&input) {
             Ok(c) => c,
             Err(e) => {
                 self.mode = Mode::CreateRemoteServer(CreateRemoteServer {
                     address_editor: editor,
                     address_error: Some(format!("could not parse: {:?}", e).into()),
+                    agent_route,
                     ssh_prompt: None,
                     _creating: None,
                 });
                 return;
             }
         };
+        if agent_route == RemoteAgentRoute::Tunneled {
+            connection_options.upload_binary_over_ssh = true;
+        }
         let ssh_prompt = cx.new(|cx| {
             RemoteConnectionPrompt::new(
                 connection_options.connection_string(),
@@ -1625,7 +1704,7 @@ impl RemoteServerProjects {
                         info!("ssh server created");
                         telemetry::event!("SSH Server Created");
                         this.retained_connections.push(client);
-                        this.add_ssh_server(connection_options, cx);
+                        this.add_ssh_server(connection_options, agent_route, cx);
                         this.mode = Mode::default_mode(&this.ssh_config_servers, cx);
                         this.focus_handle(cx).focus(window, cx);
                         cx.notify()
@@ -1639,6 +1718,7 @@ impl RemoteServerProjects {
                         this.mode = Mode::CreateRemoteServer(CreateRemoteServer {
                             address_editor,
                             address_error: None,
+                            agent_route,
                             ssh_prompt: None,
                             _creating: None,
                         });
@@ -1655,6 +1735,7 @@ impl RemoteServerProjects {
         self.mode = Mode::CreateRemoteServer(CreateRemoteServer {
             address_editor: editor,
             address_error: None,
+            agent_route,
             ssh_prompt: Some(ssh_prompt),
             _creating: Some(creating),
         });
@@ -1894,7 +1975,7 @@ impl RemoteServerProjects {
                     return;
                 }
 
-                self.create_ssh_server(state.address_editor.clone(), window, cx);
+                self.create_ssh_server(state.address_editor.clone(), state.agent_route, window, cx);
             }
             Mode::CreateRemoteDevContainer(_) => {}
             Mode::EditNickname(state) => {
@@ -1925,7 +2006,8 @@ impl RemoteServerProjects {
                 cx.emit(DismissEvent);
             }
             Mode::CreateRemoteServer(state) if state.ssh_prompt.is_some() => {
-                let new_state = CreateRemoteServer::new(window, cx);
+                let mut new_state = CreateRemoteServer::new(window, cx);
+                new_state.agent_route = state.agent_route;
                 let old_prompt = state.address_editor.read(cx).text(cx);
                 new_state.address_editor.update(cx, |this, cx| {
                     this.set_text(old_prompt, window, cx);
@@ -2072,6 +2154,21 @@ impl RemoteServerProjects {
         {
             *agent_route = route;
         }
+        self.default_picker.update(cx, |picker, cx| {
+            for entry in &mut picker.delegate.state.servers {
+                if let RemoteEntry::Project {
+                    connection: Connection::Ssh(connection),
+                    index: ServerIndex::Ssh(index),
+                    ..
+                } = entry
+                    && *index == server
+                {
+                    connection.agent_route = Some(route);
+                    cx.notify();
+                    break;
+                }
+            }
+        });
         self.update_settings_file(cx, move |setting, _| {
             if let Some(connection) = setting
                 .ssh_connections
@@ -2147,6 +2244,7 @@ impl RemoteServerProjects {
     fn add_ssh_server(
         &mut self,
         connection_options: remote::SshConnectionOptions,
+        agent_route: RemoteAgentRoute,
         cx: &mut Context<Self>,
     ) {
         self.update_settings_file(cx, move |setting, _| {
@@ -2163,7 +2261,7 @@ impl RemoteServerProjects {
                     upload_binary_over_ssh: None,
                     port_forwards: connection_options.port_forwards,
                     connection_timeout: connection_options.connection_timeout,
-                    agent_route: None,
+                    agent_route: Some(agent_route),
                 })
         });
     }
@@ -2528,6 +2626,37 @@ impl RemoteServerProjects {
                     .border_color(theme.colors().border_variant)
                     .child(state.address_editor.clone()),
             )
+            .when(ssh_prompt.is_none(), |this| {
+                this.child(
+                    h_flex()
+                        .p_2()
+                        .gap_2()
+                        .child(Label::new("Agent Connection"))
+                        .child(
+                            Button::new("agent-route-direct", "Direct")
+                                .toggle_state(state.agent_route == RemoteAgentRoute::Direct)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Mode::CreateRemoteServer(state) = &mut this.mode {
+                                        state.agent_route = RemoteAgentRoute::Direct;
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new("agent-route-tunneled", "Tunneled")
+                                .toggle_state(state.agent_route == RemoteAgentRoute::Tunneled)
+                                .tooltip(Tooltip::text(
+                                    "Use this computer's internet for the remote agent.",
+                                ))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Mode::CreateRemoteServer(state) = &mut this.mode {
+                                        state.agent_route = RemoteAgentRoute::Tunneled;
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
+                )
+            })
             .child(
                 h_flex()
                     .bg(theme.colors().editor_background)
@@ -3018,6 +3147,7 @@ impl RemoteServerProjects {
     fn create_host_from_ssh_config(
         &mut self,
         ssh_config_host: &SharedString,
+        agent_route: RemoteAgentRoute,
         cx: &mut Context<'_, Self>,
     ) -> SshServerIndex {
         let new_ix = RemoteSettings::get_global(cx).ssh_connections().count();
@@ -3027,6 +3157,7 @@ impl RemoteServerProjects {
                 host: ssh_config_host.to_string().into(),
                 ..SshConnectionOptions::default()
             },
+            agent_route,
             cx,
         );
         self.mode = Mode::default_mode(&self.ssh_config_servers, cx);
@@ -3145,11 +3276,6 @@ impl Render for RemoteServerProjects {
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                 this.focus_handle(cx).focus(window, cx);
             }))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                if matches!(this.mode, Mode::Default) {
-                    cx.emit(DismissEvent)
-                }
-            }))
             .child(match &self.mode {
                 Mode::Default => self.render_default(window, cx).into_any_element(),
                 Mode::ViewServerOptions(state) => self
@@ -3224,7 +3350,7 @@ mod create_host_tests {
     }
 
     #[gpui::test]
-    async fn test_create_host_from_ssh_config_returns_new_connection_index(
+    async fn test_create_host_from_ssh_config_saves_route_and_returns_new_index(
         cx: &mut TestAppContext,
     ) {
         let app_state = init_test(cx);
@@ -3254,7 +3380,7 @@ mod create_host_tests {
 
         let host_b = SharedString::from("host-b.example");
         let new_index = modal.update(cx, |modal, cx| {
-            modal.create_host_from_ssh_config(&host_b, cx)
+            modal.create_host_from_ssh_config(&host_b, RemoteAgentRoute::Tunneled, cx)
         });
         cx.run_until_parked();
 
@@ -3274,5 +3400,9 @@ mod create_host_tests {
 
         assert_eq!(connections[0].projects.len(), 1);
         assert!(connections[new_index.0].projects.is_empty());
+        assert_eq!(
+            connections[new_index.0].effective_agent_route(),
+            RemoteAgentRoute::Tunneled
+        );
     }
 }

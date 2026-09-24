@@ -20,3 +20,12 @@ commit=$(git rev-parse HEAD | cut -c 1-7)
 archive="zed-linux-${arch}.tar.gz"
 export ZED_BUNDLE_PATH="${CARGO_TARGET_DIR:-target}/release/${archive}"
 script/install.sh
+
+suffix=""
+if [[ "$ZED_CHANNEL" != "stable" ]]; then
+  suffix="-$ZED_CHANNEL"
+fi
+server_archive="${CARGO_TARGET_DIR:-target}/zed-remote-server-linux-${arch}.gz"
+installed_libexec="$HOME/.local/zed${suffix}.app/libexec"
+cp "$server_archive" "$installed_libexec/"
+sha256sum "$server_archive" | cut -d ' ' -f 1 > "$installed_libexec/zed-remote-server-local-build"
