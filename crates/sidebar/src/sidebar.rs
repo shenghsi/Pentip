@@ -7665,12 +7665,19 @@ impl Sidebar {
                     };
                     let session_uuid = *session_id;
                     let session_id = session_uuid.to_string();
+                    let remote_connection = workspace
+                        .read(cx)
+                        .project()
+                        .read(cx)
+                        .remote_connection_options(cx);
                     let existing = TerminalThreadMetadataStore::global(cx)
                         .read(cx)
                         .entries()
                         .find(|metadata| {
-                            metadata.remote_connection.is_none()
-                                && metadata.agent_cli.as_deref() == Some("codex")
+                            remote::same_remote_connection_identity(
+                                metadata.remote_connection.as_ref(),
+                                remote_connection.as_ref(),
+                            ) && metadata.agent_cli.as_deref() == Some("codex")
                                 && metadata
                                     .agent_cli_session_prefix
                                     .as_deref()
@@ -7683,13 +7690,17 @@ impl Sidebar {
                         custom_title: Some(title.clone().into()),
                         created_at: *created_at,
                         worktree_paths: workspace.read(cx).project().read(cx).worktree_paths(cx),
-                        remote_connection: None,
+                        remote_connection: remote_connection.clone(),
                         working_directory: Some(working_directory.clone()),
                         agent_cli: Some("codex".into()),
                         agent_cli_session_prefix: Some(session_id),
                     });
                     let workspace = this
-                        .find_current_workspace_for_path_list(metadata.folder_paths(), None, cx)
+                        .find_current_workspace_for_path_list(
+                            metadata.folder_paths(),
+                            remote_connection.as_ref(),
+                            cx,
+                        )
                         .unwrap_or(workspace);
                     this.show_thread_list(window, cx);
                     this.activate_terminal_entry(
@@ -7711,12 +7722,19 @@ impl Sidebar {
                     };
                     let session_uuid = *session_id;
                     let session_id = session_uuid.to_string();
+                    let remote_connection = workspace
+                        .read(cx)
+                        .project()
+                        .read(cx)
+                        .remote_connection_options(cx);
                     let existing = TerminalThreadMetadataStore::global(cx)
                         .read(cx)
                         .entries()
                         .find(|metadata| {
-                            metadata.remote_connection.is_none()
-                                && metadata.agent_cli.as_deref() == Some("claude")
+                            remote::same_remote_connection_identity(
+                                metadata.remote_connection.as_ref(),
+                                remote_connection.as_ref(),
+                            ) && metadata.agent_cli.as_deref() == Some("claude")
                                 && metadata.agent_cli_session_prefix.as_deref()
                                     == Some(session_id.as_str())
                         })
@@ -7727,13 +7745,17 @@ impl Sidebar {
                         custom_title: Some(title.clone().into()),
                         created_at: *updated_at,
                         worktree_paths: workspace.read(cx).project().read(cx).worktree_paths(cx),
-                        remote_connection: None,
+                        remote_connection: remote_connection.clone(),
                         working_directory: Some(working_directory.clone()),
                         agent_cli: Some("claude".into()),
                         agent_cli_session_prefix: Some(session_id),
                     });
                     let workspace = this
-                        .find_current_workspace_for_path_list(metadata.folder_paths(), None, cx)
+                        .find_current_workspace_for_path_list(
+                            metadata.folder_paths(),
+                            remote_connection.as_ref(),
+                            cx,
+                        )
                         .unwrap_or(workspace);
                     this.show_thread_list(window, cx);
                     this.activate_terminal_entry(

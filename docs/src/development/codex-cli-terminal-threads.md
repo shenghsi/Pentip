@@ -188,8 +188,8 @@ Codex terminal, select **Codex CLI** again.
 
 ## Thread History {#codex-cli-terminal-threads-history}
 
-Select **Show Thread History** to see Codex sessions for the current local
-project. This includes sessions started outside Pentip and archived sessions.
+Select **Show Thread History** to see Codex sessions for the current local or
+remote project. This includes sessions started outside Pentip and archived sessions.
 Pentip matches the saved working folder to an open project folder or one of its
 subfolders.
 
@@ -202,7 +202,9 @@ Select a Codex session to open it in an Agent Panel terminal with
 `codex resume <session-id>`. Pentip uses the full saved session ID. If the session
 already has a Terminal Thread in Pentip, Pentip opens that terminal.
 
-This history scan does not read sessions on remote or WSL hosts.
+For a remote project, Pentip asks the remote server to read the session files on
+that device. The session history stays on the remote device. Select a session to
+resume it in a terminal on the same remote device.
 
 The same history view reads Claude sessions from `history.jsonl` and
 `projects/**/*.jsonl` under `CLAUDE_CONFIG_DIR`, or `~/.claude` when that

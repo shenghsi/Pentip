@@ -39,6 +39,7 @@ use crate::ExpandMessageEditor;
 use crate::ManageProfiles;
 use crate::agent_connection_store::AgentConnectionStore;
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
+use crate::managed_agent;
 use crate::terminal_agent_status::DetectedTerminalAgentStatus;
 use crate::terminal_thread_metadata_store::{
     TerminalAgentStatus, TerminalThreadMetadata, TerminalThreadMetadataStore,
@@ -79,9 +80,10 @@ use futures::FutureExt as _;
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
     Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
-    PlatformDisplay, Subscription, Task, TaskExt, WeakEntity, WindowHandle, prelude::*,
-    pulsating_between,
+    PlatformDisplay, PromptLevel, Subscription, Task, TaskExt, WeakEntity, WindowHandle,
+    prelude::*, pulsating_between,
 };
+use http_client::HttpClient;
 use language::LanguageRegistry;
 use language_model::LanguageModelRegistry;
 use notifications::status_toast::StatusToast;
@@ -1307,6 +1309,8 @@ pub struct AgentPanel {
     draft_thread: Option<Entity<ConversationView>>,
     retained_threads: HashMap<ThreadId, Entity<ConversationView>>,
     terminals: HashMap<TerminalId, AgentTerminal>,
+    egress_manager: Arc<crate::egress::AgentEgressManager>,
+    egress_leases: HashMap<TerminalId, crate::egress::AgentEgressLease>,
     pending_terminal_spawn: Option<TerminalId>,
     new_thread_menu_handle: PopoverMenuHandle<ContextMenu>,
     agent_panel_menu_handle: PopoverMenuHandle<ContextMenu>,
@@ -1327,6 +1331,143 @@ pub struct AgentPanel {
     last_context_source: Option<AgentContextSource>,
 
     is_active: bool,
+}
+
+async fn prepare_managed_remote_command(
+    agent: &'static str,
+    command: &str,
+    remote_client: Entity<remote::RemoteClient>,
+    http_client: Arc<dyn HttpClient>,
+    egress_manager: Arc<crate::egress::AgentEgressManager>,
+    cx: &mut AsyncWindowContext,
+) -> Result<Option<(String, crate::egress::AgentEgressLease)>> {
+    let (connection, proto_client, platform, path_style) =
+        cx.read_entity(&remote_client, |client, _| {
+            (
+                client.connection(),
+                client.proto_client(),
+                client.remote_platform(),
+                client.path_style(),
+            )
+        });
+    let connection = connection.context("remote connection is unavailable")?;
+    if platform.os.is_windows() {
+        anyhow::bail!("managed remote agents currently require a POSIX SSH host");
+    }
+    let installed = proto_client
+        .request(proto::GetManagedAgentInstallation {
+            agent: agent.to_string(),
+        })
+        .await?;
+    let release = match managed_agent::latest_release(http_client.clone(), agent, platform).await {
+        Ok(release) => Some(release),
+        Err(error) if !installed.executable_path.is_empty() => {
+            log::warn!("could not check for a newer {agent} release: {error:#}");
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    let executable_path = if let Some(release) = release {
+        if installed.version == release.version && !installed.executable_path.is_empty() {
+            installed.executable_path
+        } else {
+            let message = if installed.executable_path.is_empty() {
+                format!(
+                    "Download {agent} {} and install it on the remote device?",
+                    release.version
+                )
+            } else {
+                format!(
+                    "Update remote {agent} from {} to {}?",
+                    installed.version, release.version
+                )
+            };
+            let answers = if installed.executable_path.is_empty() {
+                vec!["Download and launch", "Cancel"]
+            } else {
+                vec!["Update and launch", "Use installed version", "Cancel"]
+            };
+            match cx
+                .prompt(PromptLevel::Info, &message, None, &answers)
+                .await?
+            {
+                0 => {
+                    let artifact = managed_agent::acquire_artifact(http_client, &release).await?;
+                    let stage = proto_client
+                        .request(proto::StageManagedAgentInstallation {
+                            agent: agent.to_string(),
+                            version: release.version.clone(),
+                        })
+                        .await?;
+                    let upload = cx.update(|_, app| {
+                        remote_client.read(app).upload_file(
+                            artifact.path,
+                            util::paths::RemotePathBuf::new(stage.upload_path, path_style),
+                            app,
+                        )
+                    })?;
+                    upload.await?;
+                    proto_client
+                        .request(proto::CommitManagedAgentInstallation {
+                            agent: agent.to_string(),
+                            version: release.version,
+                            stage_id: stage.stage_id,
+                            sha256: artifact.sha256,
+                        })
+                        .await?
+                        .executable_path
+                }
+                1 if !installed.executable_path.is_empty() => installed.executable_path,
+                _ => return Ok(None),
+            }
+        }
+    } else {
+        installed.executable_path
+    };
+    let allowed_hosts: &'static [&'static str] = match agent {
+        "codex" => &["api.openai.com", "auth.openai.com", "chatgpt.com"],
+        "claude" => &["api.anthropic.com", "claude.ai", "platform.claude.com"],
+        _ => anyhow::bail!("unsupported managed remote agent"),
+    };
+    let executor = cx.update(|_, app| app.background_executor().clone())?;
+    let egress = egress_manager
+        .acquire(
+            remote_client.entity_id(),
+            connection,
+            allowed_hosts,
+            &executor,
+        )
+        .await?;
+    let proxy_url = egress.proxy_url();
+    let quoted_proxy = util::shell::ShellKind::Posix
+        .try_quote(&proxy_url)
+        .context("could not quote managed agent proxy URL")?;
+    let quoted_executable = util::shell::ShellKind::Posix
+        .try_quote(&executable_path)
+        .context("could not quote managed agent executable path")?;
+    let arguments = command.strip_prefix(agent);
+    let update_policy = if agent == "codex" {
+        " -c check_for_update_on_startup=false"
+    } else {
+        ""
+    };
+    let claude_update_policy = if agent == "claude" {
+        "DISABLE_UPDATES=1 DISABLE_AUTOUPDATER=1 "
+    } else {
+        ""
+    };
+    let environment = format!(
+        "{claude_update_policy}HTTPS_PROXY={quoted_proxy} HTTP_PROXY={quoted_proxy} \
+         https_proxy={quoted_proxy} http_proxy={quoted_proxy} NO_PROXY=localhost,127.0.0.1"
+    );
+    let managed_command = if let Some(arguments) = arguments {
+        format!("{environment} {quoted_executable}{update_policy}{arguments}")
+    } else {
+        format!(
+            "{agent}() {{ {environment} {quoted_executable}{update_policy} \"$@\"; }}; {command}"
+        )
+    };
+    Ok(Some((managed_command, egress)))
 }
 
 impl AgentPanel {
@@ -1720,6 +1861,8 @@ impl AgentPanel {
             persist_selected_agent_task: Task::ready(()),
             retained_threads: HashMap::default(),
             terminals: HashMap::default(),
+            egress_manager: Arc::new(crate::egress::AgentEgressManager::new()),
+            egress_leases: HashMap::default(),
             pending_terminal_spawn: None,
             new_thread_menu_handle: PopoverMenuHandle::default(),
             agent_panel_menu_handle: PopoverMenuHandle::default(),
@@ -2368,16 +2511,86 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         let terminal_working_directory = working_directory.clone();
-        let startup_commands =
+        let mut startup_commands =
             Self::terminal_startup_commands(run_init_command, startup_command, cx);
-        let terminal_task = self.project.update(cx, |project, cx| {
-            project.create_terminal_shell(working_directory, cx)
-        });
+        let managed_remote = agent_cli
+            .as_deref()
+            .and_then(|agent| match agent {
+                "codex" => Some("codex"),
+                "claude" => Some("claude"),
+                _ => None,
+            })
+            .and_then(|agent| {
+                let project = self.project.read(cx);
+                project
+                    .remote_connection_options(cx)
+                    .is_some_and(|connection| {
+                        crate::RemoteAgentRoutingSettings::get_global(cx).route_for(&connection)
+                            == Some(settings::RemoteAgentRoute::Tunneled)
+                    })
+                    .then(|| project.remote_client().map(|client| (agent, client)))
+                    .flatten()
+            });
+        let http_client = self.project.read(cx).client().http_client();
+        let egress_manager = self.egress_manager.clone();
         let workspace = self.workspace.clone();
         let workspace_id = self.workspace_id;
+        let project_entity = self.project.clone();
         let project = self.project.downgrade();
 
         cx.spawn_in(window, async move |this, cx| {
+            let egress_lease = if let Some((agent, remote_client)) = managed_remote {
+                let Some(command) = startup_commands.last().cloned() else {
+                    return anyhow::Ok(());
+                };
+                match prepare_managed_remote_command(
+                    agent,
+                    &command,
+                    remote_client,
+                    http_client,
+                    egress_manager,
+                    cx,
+                )
+                .await
+                {
+                    Ok(Some((managed_command, lease))) => {
+                        if let Some(command) = startup_commands.last_mut() {
+                            *command = managed_command;
+                        }
+                        Some(lease)
+                    }
+                    Ok(None) => {
+                        this.update(cx, |this, cx| {
+                            if this.pending_terminal_spawn == Some(terminal_id) {
+                                this.pending_terminal_spawn = None;
+                                cx.notify();
+                            }
+                        })
+                        .log_err();
+                        return anyhow::Ok(());
+                    }
+                    Err(error) => {
+                        workspace
+                            .update(cx, |workspace, cx| workspace.show_error(error, cx))
+                            .log_err();
+                        this.update(cx, |this, cx| {
+                            if this.pending_terminal_spawn == Some(terminal_id) {
+                                this.pending_terminal_spawn = None;
+                                cx.notify();
+                            }
+                        })
+                        .log_err();
+                        return anyhow::Ok(());
+                    }
+                }
+            } else {
+                None
+            };
+            let terminal_task = cx.update(|_, app| {
+                project_entity.update(app, |project, cx| {
+                    project.create_terminal_shell(working_directory, cx)
+                })
+            })?;
             let terminal = match terminal_task.await {
                 Ok(terminal) => terminal,
                 Err(error) => {
@@ -2430,6 +2643,9 @@ impl AgentPanel {
                     window,
                     cx,
                 );
+                if let Some(lease) = egress_lease {
+                    this.egress_leases.insert(terminal_id, lease);
+                }
                 if let Some(prefix) = saved_session_prefix {
                     if let Some(terminal) = this.terminals.get_mut(&terminal_id) {
                         terminal.agent_cli_session_prefix = Some(prefix);
@@ -2770,8 +2986,7 @@ impl AgentPanel {
             cx.background_executor()
                 .timer(Duration::from_millis(150))
                 .await;
-            terminal_entity
-                .update(cx, |terminal, _| terminal.input(vec![b'\x03']));
+            terminal_entity.update(cx, |terminal, _| terminal.input(vec![b'\x03']));
             for _ in 0..30 {
                 cx.background_executor()
                     .timer(Duration::from_millis(100))
@@ -2817,6 +3032,7 @@ impl AgentPanel {
         let Some(terminal) = self.terminals.remove(&terminal_id) else {
             return;
         };
+        self.egress_leases.remove(&terminal_id);
         let terminal_entity = terminal.view.read(cx).terminal().clone();
         terminal_entity.update(cx, |terminal, _| terminal.terminate_processes());
         if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {

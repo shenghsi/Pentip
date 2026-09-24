@@ -1,6 +1,8 @@
 use crate::{
     RemoteArch, RemoteClientDelegate, RemoteOs, RemotePlatform,
-    remote_client::{CommandTemplate, Interactive, RemoteConnection, RemoteConnectionOptions},
+    remote_client::{
+        CommandTemplate, Interactive, RemoteConnection, RemoteConnectionOptions, RemotePortForward,
+    },
     transport::{parse_platform, parse_shell},
 };
 use anyhow::{Context as _, Result, anyhow};
@@ -11,7 +13,7 @@ use futures::{
     channel::mpsc::{Sender, UnboundedReceiver, UnboundedSender},
     select_biased,
 };
-use gpui::{App, AppContext as _, AsyncApp, Task};
+use gpui::{App, AppContext as _, AsyncApp, BackgroundExecutor, Task};
 use parking_lot::Mutex;
 use paths::remote_server_dir_relative;
 use release_channel::{AppVersion, ReleaseChannel};
@@ -38,6 +40,62 @@ use util::{
 
 /// How long to wait for SSH to connect when no askpass prompt has opened.
 const SSH_CONNECTION_PROMPT_TIMEOUT: Duration = Duration::from_secs(17);
+
+fn parse_allocated_remote_forward_port(output: &str) -> Option<u16> {
+    let port = output.trim().parse::<u16>().ok().or_else(|| {
+        output.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix("Allocated port ")?
+                .split_once(" for remote forward")?
+                .0
+                .parse::<u16>()
+                .ok()
+        })
+    })?;
+    (port != 0).then_some(port)
+}
+
+#[cfg(test)]
+mod remote_agent_forward_tests {
+    use super::parse_allocated_remote_forward_port;
+
+    #[test]
+    fn parses_allocated_port_and_rejects_invalid_ports() {
+        assert_eq!(parse_allocated_remote_forward_port("43123\n"), Some(43123));
+        assert_eq!(
+            parse_allocated_remote_forward_port(
+                "Allocated port 43123 for remote forward to 127.0.0.1:8080"
+            ),
+            Some(43123)
+        );
+        assert_eq!(parse_allocated_remote_forward_port("0\n"), None);
+        assert_eq!(parse_allocated_remote_forward_port("70000\n"), None);
+    }
+}
+
+#[cfg(not(windows))]
+async fn run_ssh_forward_control_command(
+    arguments: Vec<String>,
+    environment: HashMap<String, String>,
+    operation: &'static str,
+    executor: &BackgroundExecutor,
+) -> Result<std::process::Output> {
+    let mut command = util::command::new_command("ssh");
+    command
+        .args(arguments)
+        .envs(environment)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = command.output().fuse();
+    let timeout = executor.timer(Duration::from_secs(15)).fuse();
+    futures::pin_mut!(output, timeout);
+    futures::select! {
+        result = output => result.with_context(|| format!("failed to {operation}")),
+        _ = timeout => anyhow::bail!("SSH timed out while trying to {operation}"),
+    }
+}
 
 pub(crate) struct SshRemoteConnection {
     socket: SshSocket,
@@ -149,6 +207,7 @@ pub struct SshConnectionOptions {
 
 impl From<settings::SshConnection> for SshConnectionOptions {
     fn from(val: settings::SshConnection) -> Self {
+        let upload_binary_over_ssh = val.should_upload_binary_over_ssh();
         SshConnectionOptions {
             host: val.host.to_string().into(),
             username: val.username,
@@ -156,7 +215,7 @@ impl From<settings::SshConnection> for SshConnectionOptions {
             password: None,
             args: Some(val.args),
             nickname: val.nickname,
-            upload_binary_over_ssh: val.upload_binary_over_ssh.unwrap_or_default(),
+            upload_binary_over_ssh,
             port_forwards: val.port_forwards,
             connection_timeout: val.connection_timeout,
         }
@@ -300,6 +359,110 @@ impl AsMut<Child> for MasterProcess {
 
 #[async_trait(?Send)]
 impl RemoteConnection for SshRemoteConnection {
+    fn upload_file(
+        &self,
+        source: PathBuf,
+        destination: RemotePathBuf,
+        cx: &App,
+    ) -> Task<Result<()>> {
+        let source_text = source.to_string_lossy().into_owned();
+        let destination_text = destination.to_string();
+        let mut sftp_command = self.build_sftp_command();
+        let mut scp_command = self.build_scp_command(&source, &destination_text, None);
+        cx.background_spawn(async move {
+            if Self::is_sftp_available().await {
+                let mut child = sftp_command.spawn()?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    use futures::AsyncWriteExt as _;
+                    stdin
+                        .write_all(sftp_put_command(&source_text, &destination_text).as_bytes())
+                        .await?;
+                    stdin.flush().await?;
+                }
+                if child.output().await?.status.success() {
+                    return Ok(());
+                }
+            }
+            let output = scp_command.output().await?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "failed to upload agent file: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            }
+        })
+    }
+
+    #[cfg(not(windows))]
+    async fn open_reverse_port_forward(
+        &self,
+        local_port: u16,
+        executor: &BackgroundExecutor,
+    ) -> Result<RemotePortForward> {
+        let forward_specification = format!("127.0.0.1:0:127.0.0.1:{local_port}");
+        let mut arguments = self.socket.ssh_command_options();
+        arguments.extend([
+            "-O".into(),
+            "forward".into(),
+            "-o".into(),
+            "ExitOnForwardFailure=yes".into(),
+            "-R".into(),
+            forward_specification.clone(),
+            self.socket.connection_options.ssh_destination(),
+        ]);
+        let output = run_ssh_forward_control_command(
+            arguments,
+            self.socket.envs.clone(),
+            "open the remote port forward",
+            executor,
+        )
+        .await?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "SSH failed to open the remote port forward: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let remote_port =
+            parse_allocated_remote_forward_port(&String::from_utf8_lossy(&output.stdout))
+                .context("SSH returned no allocated remote port")?;
+        let mut cancellation_arguments = self.socket.ssh_command_options();
+        cancellation_arguments.extend([
+            "-O".into(),
+            "cancel".into(),
+            "-R".into(),
+            forward_specification,
+            self.socket.connection_options.ssh_destination(),
+        ]);
+        let environment = self.socket.envs.clone();
+        let cancellation_executor = executor.clone();
+        Ok(RemotePortForward::new(
+            remote_port,
+            executor.clone(),
+            move || {
+                async move {
+                    let output = run_ssh_forward_control_command(
+                        cancellation_arguments,
+                        environment,
+                        "close the remote port forward",
+                        &cancellation_executor,
+                    )
+                    .await?;
+                    if !output.status.success() {
+                        anyhow::bail!(
+                            "SSH failed to close the remote port forward: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                    }
+                    Ok(())
+                }
+                .boxed()
+            },
+        ))
+    }
+
     async fn kill(&self) -> Result<()> {
         self.killed.store(true, Ordering::Release);
         let Some(mut process) = self.master_process.lock().take() else {
@@ -835,10 +998,14 @@ impl SshRemoteConnection {
         version: Version,
         cx: &mut AsyncApp,
     ) -> Result<Arc<RelPath>> {
-        let version_str = match release_channel {
+        let mut version_str = match release_channel {
             ReleaseChannel::Dev => "build".to_string(),
             _ => version.to_string(),
         };
+        if let Some(id) = paths::local_build_remote_server_id()? {
+            version_str.push('-');
+            version_str.push_str(&id);
+        }
         let binary_name = format!(
             "zed-remote-server-{}-{}{}",
             release_channel.dev_name(),
@@ -2069,6 +2236,17 @@ fn build_command_windows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tunneled_saved_connection_uploads_remote_server_over_ssh() {
+        let mut connection = settings::SshConnection {
+            host: "build.example.com".into(),
+            ..Default::default()
+        };
+        assert!(!SshConnectionOptions::from(connection.clone()).upload_binary_over_ssh);
+        connection.agent_route = Some(settings::RemoteAgentRoute::Tunneled);
+        assert!(SshConnectionOptions::from(connection).upload_binary_over_ssh);
+    }
 
     #[test]
     fn test_build_command() -> Result<()> {

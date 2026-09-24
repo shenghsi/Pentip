@@ -123,6 +123,44 @@ pub struct CommandTemplate {
     pub env: HashMap<String, String>,
 }
 
+pub struct RemotePortForward {
+    remote_port: u16,
+    closer: Option<Box<dyn FnOnce() -> BoxFuture<'static, Result<()>> + Send + Sync>>,
+    executor: BackgroundExecutor,
+}
+
+impl RemotePortForward {
+    pub fn new(
+        remote_port: u16,
+        executor: BackgroundExecutor,
+        closer: impl FnOnce() -> BoxFuture<'static, Result<()>> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            remote_port,
+            closer: Some(Box::new(closer)),
+            executor,
+        }
+    }
+
+    pub fn remote_port(&self) -> u16 {
+        self.remote_port
+    }
+}
+
+impl Drop for RemotePortForward {
+    fn drop(&mut self) {
+        if let Some(closer) = self.closer.take() {
+            self.executor
+                .spawn(async move {
+                    if let Err(error) = closer().await {
+                        log::error!("failed to close remote port forward: {error:#}");
+                    }
+                })
+                .detach();
+        }
+    }
+}
+
 /// Whether a command should be run with TTY allocation for interactive use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Interactive {
@@ -991,6 +1029,18 @@ impl RemoteClient {
         connection.upload_directory(src_path, dest_path, cx)
     }
 
+    pub fn upload_file(
+        &self,
+        source: PathBuf,
+        destination: RemotePathBuf,
+        cx: &App,
+    ) -> Task<Result<()>> {
+        let Some(connection) = self.remote_connection() else {
+            return Task::ready(Err(anyhow!("no remote connection")));
+        };
+        connection.upload_file(source, destination, cx)
+    }
+
     pub fn proto_client(&self) -> AnyProtoClient {
         self.client.clone().into()
     }
@@ -1588,6 +1638,23 @@ pub struct OpenWslPath {
 
 #[async_trait(?Send)]
 pub trait RemoteConnection: Send + Sync {
+    fn upload_file(
+        &self,
+        _source: PathBuf,
+        _destination: RemotePathBuf,
+        _cx: &App,
+    ) -> Task<Result<()>> {
+        Task::ready(Err(anyhow!(
+            "file upload is unavailable for this remote connection"
+        )))
+    }
+    async fn open_reverse_port_forward(
+        &self,
+        _local_port: u16,
+        _executor: &BackgroundExecutor,
+    ) -> Result<RemotePortForward> {
+        anyhow::bail!("reverse port forwarding is unavailable for this remote connection")
+    }
     fn start_proxy(
         &self,
         unique_identifier: String,

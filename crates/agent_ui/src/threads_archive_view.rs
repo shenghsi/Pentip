@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::agent_connection_store::AgentConnectionStore;
-use crate::claude_thread_history::{ClaudeSession, load_history as load_claude_history};
 use crate::cli_thread_history::{CliSession, load_agy_history, load_pi_history};
-use crate::codex_thread_history::{CodexSession, load_history};
+use agent::claude_thread_history::{ClaudeSession, load_history as load_claude_history};
+use agent::codex_thread_history::{CodexSession, load_history};
 
 use crate::thread_metadata_store::{
     ThreadId, ThreadMetadata, ThreadMetadataStore, worktree_info_from_thread_paths,
@@ -316,18 +316,21 @@ impl ThreadsArchiveView {
     fn load_codex_history(&mut self, cx: &mut Context<Self>) {
         let Ok(project_data) = self.workspace.read_with(cx, |workspace, cx| {
             let project = workspace.project().read(cx);
-            project.is_local().then(|| {
+            (!project.is_via_collab()).then(|| {
                 let project_paths = project
                     .visible_worktrees(cx)
                     .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
                     .collect::<Vec<_>>();
-                (project_paths, project.environment().clone())
+                let remote_client = project
+                    .remote_client()
+                    .map(|client| client.read(cx).proto_client());
+                (project_paths, project.environment().clone(), remote_client)
             })
         }) else {
             return;
         };
-        let Some((project_paths, environment)) =
-            project_data.filter(|(paths, _)| !paths.is_empty())
+        let Some((project_paths, environment, remote_client)) =
+            project_data.filter(|(paths, _, _)| !paths.is_empty())
         else {
             return;
         };
@@ -347,9 +350,46 @@ impl ThreadsArchiveView {
                         .map(PathBuf::from)
                 })
                 .unwrap_or_else(|| paths::home_dir().join(".codex"));
-            let result = cx
-                .background_spawn(async move { load_history(&codex_home, &project_paths) })
-                .await;
+            let result: anyhow::Result<Vec<CodexSession>> = if let Some(remote_client) =
+                remote_client
+            {
+                async {
+                    let response = remote_client
+                        .request(proto::GetRemoteAgentHistory {
+                            agent: "codex".into(),
+                            history_root: environment
+                                .as_ref()
+                                .and_then(|environment| environment.get("CODEX_HOME"))
+                                .cloned()
+                                .unwrap_or_default(),
+                            project_paths: project_paths
+                                .iter()
+                                .map(|path| path.to_string_lossy().into_owned())
+                                .collect(),
+                        })
+                        .await?;
+                    response
+                        .sessions
+                        .into_iter()
+                        .map(|session| {
+                            Ok(CodexSession {
+                                id: uuid::Uuid::parse_str(&session.id)?,
+                                title: session.title,
+                                working_directory: session.working_directory.into(),
+                                created_at: DateTime::from_timestamp(session.timestamp_seconds, 0)
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!("invalid remote Codex session time")
+                                    })?,
+                                archived: session.archived,
+                            })
+                        })
+                        .collect()
+                }
+                .await
+            } else {
+                cx.background_spawn(async move { load_history(&codex_home, &project_paths) })
+                    .await
+            };
             this.update(cx, |this, cx| {
                 this.loading_codex_history = false;
                 match result {
@@ -378,18 +418,21 @@ impl ThreadsArchiveView {
     fn load_claude_history(&mut self, cx: &mut Context<Self>) {
         let Ok(project_data) = self.workspace.read_with(cx, |workspace, cx| {
             let project = workspace.project().read(cx);
-            project.is_local().then(|| {
+            (!project.is_via_collab()).then(|| {
                 let project_paths = project
                     .visible_worktrees(cx)
                     .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
                     .collect::<Vec<_>>();
-                (project_paths, project.environment().clone())
+                let remote_client = project
+                    .remote_client()
+                    .map(|client| client.read(cx).proto_client());
+                (project_paths, project.environment().clone(), remote_client)
             })
         }) else {
             return;
         };
-        let Some((project_paths, environment)) =
-            project_data.filter(|(paths, _)| !paths.is_empty())
+        let Some((project_paths, environment, remote_client)) =
+            project_data.filter(|(paths, _, _)| !paths.is_empty())
         else {
             return;
         };
@@ -409,9 +452,47 @@ impl ThreadsArchiveView {
                         .map(PathBuf::from)
                 })
                 .unwrap_or_else(|| paths::home_dir().join(".claude"));
-            let result = cx
-                .background_spawn(async move { load_claude_history(&claude_home, &project_paths) })
-                .await;
+            let result: anyhow::Result<Vec<ClaudeSession>> = if let Some(remote_client) =
+                remote_client
+            {
+                async {
+                    let response = remote_client
+                        .request(proto::GetRemoteAgentHistory {
+                            agent: "claude".into(),
+                            history_root: environment
+                                .as_ref()
+                                .and_then(|environment| environment.get("CLAUDE_CONFIG_DIR"))
+                                .cloned()
+                                .unwrap_or_default(),
+                            project_paths: project_paths
+                                .iter()
+                                .map(|path| path.to_string_lossy().into_owned())
+                                .collect(),
+                        })
+                        .await?;
+                    response
+                        .sessions
+                        .into_iter()
+                        .map(|session| {
+                            Ok(ClaudeSession {
+                                id: uuid::Uuid::parse_str(&session.id)?,
+                                title: session.title,
+                                working_directory: session.working_directory.into(),
+                                updated_at: DateTime::from_timestamp(session.timestamp_seconds, 0)
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!("invalid remote Claude session time")
+                                    })?,
+                            })
+                        })
+                        .collect()
+                }
+                .await
+            } else {
+                cx.background_spawn(
+                    async move { load_claude_history(&claude_home, &project_paths) },
+                )
+                .await
+            };
             this.update(cx, |this, cx| {
                 this.loading_claude_history = false;
                 match result {

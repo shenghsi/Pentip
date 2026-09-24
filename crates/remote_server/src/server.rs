@@ -1,4 +1,5 @@
 mod headless_project;
+mod remote_agent_install;
 
 #[cfg(test)]
 mod remote_editing_tests;

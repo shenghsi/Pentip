@@ -60,6 +60,54 @@ message GetPathMetadataResponse {
   bool is_dir = 3;
 }
 
+message GetRemoteAgentHistory {
+  string agent = 1;
+  string history_root = 2;
+  repeated string project_paths = 3;
+}
+
+message GetRemoteAgentHistoryResponse {
+  repeated RemoteAgentHistoryEntry sessions = 1;
+}
+
+message RemoteAgentHistoryEntry {
+  string id = 1;
+  string title = 2;
+  string working_directory = 3;
+  int64 timestamp_seconds = 4;
+  bool archived = 5;
+}
+
+message GetManagedAgentInstallation {
+  string agent = 1;
+}
+
+message GetManagedAgentInstallationResponse {
+  string version = 1;
+  string executable_path = 2;
+}
+
+message StageManagedAgentInstallation {
+  string agent = 1;
+  string version = 2;
+}
+
+message StageManagedAgentInstallationResponse {
+  string stage_id = 1;
+  string upload_path = 2;
+}
+
+message CommitManagedAgentInstallation {
+  string agent = 1;
+  string version = 2;
+  string stage_id = 3;
+  string sha256 = 4;
+}
+
+message CommitManagedAgentInstallationResponse {
+  string executable_path = 1;
+}
+
 message WorktreeMetadata {
   uint64 id = 1;
   string root_name = 2;
