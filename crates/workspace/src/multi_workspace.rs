@@ -789,7 +789,7 @@ impl MultiWorkspace {
                             |agent_panel| agent_panel.panel_id() == panel.entity_id(),
                         ) =>
                 {
-                    this.sidebar_open = true;
+                    this.restore_open_sidebar(cx);
                     this.set_agentic_mode(AgenticMode::Agent, window, cx);
                 }
                 _ => {}
