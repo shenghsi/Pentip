@@ -448,9 +448,9 @@ pub(crate) fn release_job_with_guard(deps: &[&NamedJob], guard: OwnerGuard) -> J
         OwnerGuard::Restricted => release_job(deps),
         // A cold build of the whole workspace with no dependency cache (see
         // OwnerGuard's doc comment) routinely exceeds 60 minutes on standard
-        // runners; Zed's own CI never hits this because it always has a warm
-        // Namespace cache.
-        OwnerGuard::Unrestricted => dependant_job(deps).timeout_minutes(120u32),
+        // runners, and the macOS test job has exceeded 120 minutes; Zed's own
+        // CI never hits this because it always has a warm Namespace cache.
+        OwnerGuard::Unrestricted => dependant_job(deps).timeout_minutes(240u32),
     }
 }
 

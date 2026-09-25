@@ -62,7 +62,7 @@ jobs:
       if: always()
       run: |
         rm -rf ./../.cargo
-    timeout-minutes: 120
+    timeout-minutes: 240
   run_tests_linux:
     runs-on: ubuntu-latest
     env:
@@ -110,7 +110,7 @@ jobs:
       if: always()
       run: |
         rm -rf ./../.cargo
-    timeout-minutes: 120
+    timeout-minutes: 240
     services:
       postgres:
         image: postgres:15@sha256:1b92e7a80c021647bf70f5d3eb66066a998e4f5cf43c07bb9dc9f729782cf88e
@@ -163,7 +163,7 @@ jobs:
       run: |
         Remove-Item -Recurse -Path "./../.cargo" -Force -ErrorAction SilentlyContinue
       shell: pwsh
-    timeout-minutes: 120
+    timeout-minutes: 240
   clippy_mac:
     runs-on: macos-latest
     steps:
@@ -197,7 +197,7 @@ jobs:
       run: ./script/clippy
     - name: steps::show_sccache_stats
       run: sccache --show-stats || true
-    timeout-minutes: 120
+    timeout-minutes: 240
   clippy_linux:
     runs-on: ubuntu-latest
     env:
@@ -227,7 +227,7 @@ jobs:
       run: ./script/clippy
     - name: steps::show_sccache_stats
       run: sccache --show-stats || true
-    timeout-minutes: 120
+    timeout-minutes: 240
   clippy_windows:
     runs-on: windows-latest
     steps:
@@ -254,7 +254,7 @@ jobs:
     - name: steps::show_sccache_stats
       run: if ($env:RUSTC_WRAPPER) { & $env:RUSTC_WRAPPER --show-stats }; exit 0
       shell: pwsh
-    timeout-minutes: 120
+    timeout-minutes: 240
   check_scripts:
     runs-on: ubuntu-latest
     steps:
@@ -285,7 +285,7 @@ jobs:
         advanced-security: false
         min-severity: high
         version: latest
-    timeout-minutes: 120
+    timeout-minutes: 240
   create_draft_release:
     runs-on: ubuntu-latest
     permissions:
