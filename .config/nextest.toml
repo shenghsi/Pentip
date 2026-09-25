@@ -53,3 +53,9 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 [[profile.default.overrides]]
 filter = 'test(test_random_worktree_changes) or test(random_channel_buffer_tests) or test(test_peers_following_each_other) or test(test_random_multibuffer) or test(single_pane_navigation) or test(bench_task_reports_long_task_without_window) or test(test_random_project_collaboration)'
 slow-timeout = { period = "300s", terminate-after = 1 }
+
+# Observed at 40-55s on those runners in the v0.0.30 release run, and timed
+# out at 60s in the v0.0.31 run (test_editing_files on Linux).
+[[profile.default.overrides]]
+filter = 'test(test_editing_files) or test(test_item_opening) or test(test_large_buffer_inlay_requests_split) or test(test_sidebar_invariants) or test(test_streamed_lsp_pull_diagnostics) or test(test_host_disconnect) or test(test_following_across_workspaces) or test(test_collaborating_with_editorconfig) or test(test_mutual_editor_semantic_token_cache_update) or test(test_mutual_editor_inlay_hint_cache_update)'
+slow-timeout = { period = "300s", terminate-after = 1 }
