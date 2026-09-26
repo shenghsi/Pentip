@@ -59,8 +59,10 @@ fn bundle_job(deps: &[&NamedJob]) -> Job {
         // OwnerGuard's doc comment in steps.rs) can take a lot longer. 120
         // wasn't enough for bundle_windows_*/bundle_mac_*; 180 wasn't enough
         // for bundle_mac_* either (hit it exactly again) - bundle_mac_* in
-        // particular seems to be the slowest build of the bunch.
-        .timeout_minutes(240u32)
+        // particular seems to be the slowest build of the bunch. 240 was still
+        // ~12 minutes short for bundle_mac_x86_64 (needs ~252). 360 is the
+        // maximum GitHub allows for hosted runners.
+        .timeout_minutes(360u32)
 }
 
 pub(crate) fn bundle_mac(
