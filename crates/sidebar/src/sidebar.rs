@@ -117,6 +117,7 @@ enum SerializedSidebarView {
 enum NewEntryTarget {
     LastCreatedKind,
     Terminal,
+    AgentCli(AgentCli),
 }
 
 #[derive(Clone, Copy)]
@@ -1338,6 +1339,9 @@ impl Sidebar {
             this.update_in(cx, |this, window, cx| match target {
                 NewEntryTarget::LastCreatedKind => this.create_new_entry(&workspace, window, cx),
                 NewEntryTarget::Terminal => this.create_new_terminal(&workspace, window, cx),
+                NewEntryTarget::AgentCli(agent_cli) => {
+                    this.create_new_agent_cli_terminal(&workspace, agent_cli, window, cx)
+                }
             })?;
             anyhow::Ok(())
         })
@@ -2562,29 +2566,6 @@ impl Sidebar {
             .map(|mw| mw.read(cx).workspaces_for_project_group(key, cx))
             .unwrap_or_default();
 
-        if open_workspaces.is_empty() {
-            let key = key.clone();
-            return button
-                .tooltip(move |_, cx| {
-                    Tooltip::for_action_in("Start New Agent Thread", &NewThread, &focus_handle, cx)
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.set_group_expanded(&key, true, cx);
-                    this.selection = None;
-                    if let Some(workspace) = this.workspace_for_group(&key, cx) {
-                        this.create_new_entry(&workspace, window, cx);
-                    } else {
-                        this.open_workspace_and_create_entry(
-                            &key,
-                            NewEntryTarget::LastCreatedKind,
-                            window,
-                            cx,
-                        );
-                    }
-                }))
-                .into_any_element();
-        }
-
         let this = cx.weak_entity();
         let key = key.clone();
 
@@ -2624,7 +2605,9 @@ impl Sidebar {
                 window,
                 cx,
                 move |mut menu, _window, cx| {
-                    menu = menu.header("New Thread In…");
+                    if !open_workspaces.is_empty() {
+                        menu = menu.header("New Thread In…");
+                    }
 
                     for (workspace, labels) in open_workspaces
                         .iter()
@@ -2680,34 +2663,43 @@ impl Sidebar {
                         .cloned()
                         .or_else(|| open_workspaces.first().cloned());
 
-                    if let Some(workspace) = base_workspace.clone() {
-                        menu = menu.separator().header("Agent CLI");
-                        for (label, icon, agent_cli) in [
-                            ("Codex CLI", IconName::AiOpenAi, AgentCli::Codex),
-                            ("Claude CLI", IconName::AiClaude, AgentCli::Claude),
-                            ("Pi CLI", IconName::AiPi, AgentCli::Pi),
-                            (
-                                "Antigravity CLI",
-                                IconName::AiAntigravity,
-                                AgentCli::Antigravity,
-                            ),
-                        ] {
-                            let this = this.clone();
-                            let workspace = workspace.clone();
-                            let key = key.clone();
-                            menu = menu.item(ContextMenuEntry::new(label).icon(icon).handler(
-                                move |window, cx| {
-                                    this.update(cx, |sidebar, cx| {
-                                        sidebar.set_group_expanded(&key, true, cx);
-                                        sidebar.selection = None;
+                    menu = menu
+                        .when(!open_workspaces.is_empty(), |menu| menu.separator())
+                        .header("Agent CLI");
+                    for (label, icon, agent_cli) in [
+                        ("Codex CLI", IconName::AiOpenAi, AgentCli::Codex),
+                        ("Claude CLI", IconName::AiClaude, AgentCli::Claude),
+                        ("Pi CLI", IconName::AiPi, AgentCli::Pi),
+                        (
+                            "Antigravity CLI",
+                            IconName::AiAntigravity,
+                            AgentCli::Antigravity,
+                        ),
+                    ] {
+                        let this = this.clone();
+                        let workspace = base_workspace.clone();
+                        let key = key.clone();
+                        menu = menu.item(ContextMenuEntry::new(label).icon(icon).handler(
+                            move |window, cx| {
+                                this.update(cx, |sidebar, cx| {
+                                    sidebar.set_group_expanded(&key, true, cx);
+                                    sidebar.selection = None;
+                                    if let Some(workspace) = workspace.as_ref() {
                                         sidebar.create_new_agent_cli_terminal(
                                             &workspace, agent_cli, window, cx,
                                         );
-                                    })
-                                    .ok();
-                                },
-                            ));
-                        }
+                                    } else {
+                                        sidebar.open_workspace_and_create_entry(
+                                            &key,
+                                            NewEntryTarget::AgentCli(agent_cli),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                })
+                                .ok();
+                            },
+                        ));
                     }
 
                     // Only offer worktree creation when the base project can
