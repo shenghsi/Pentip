@@ -1339,6 +1339,7 @@ async fn prepare_managed_remote_command(
     remote_client: Entity<remote::RemoteClient>,
     http_client: Arc<dyn HttpClient>,
     egress_manager: Arc<crate::egress::AgentEgressManager>,
+    workspace: WeakEntity<Workspace>,
     cx: &mut AsyncWindowContext,
 ) -> Result<Option<(String, crate::egress::AgentEgressLease)>> {
     let (connection, proto_client, platform, path_style) =
@@ -1392,30 +1393,70 @@ async fn prepare_managed_remote_command(
                 .await?
             {
                 0 => {
-                    let artifact = managed_agent::acquire_artifact(http_client, &release).await?;
-                    let stage = proto_client
-                        .request(proto::StageManagedAgentInstallation {
-                            agent: agent.to_string(),
-                            version: release.version.clone(),
-                        })
-                        .await?;
-                    let upload = cx.update(|_, app| {
-                        remote_client.read(app).upload_file(
-                            artifact.path,
-                            util::paths::RemotePathBuf::new(stage.upload_path, path_style),
+                    let progress = cx.update(|_, app| {
+                        managed_agent::ManagedAgentProgressNotification::new(
+                            agent,
+                            &release.version,
                             app,
                         )
                     })?;
-                    upload.await?;
-                    proto_client
-                        .request(proto::CommitManagedAgentInstallation {
-                            agent: agent.to_string(),
-                            version: release.version,
-                            stage_id: stage.stage_id,
-                            sha256: artifact.sha256,
-                        })
-                        .await?
-                        .executable_path
+                    workspace.update(cx, |workspace, cx| progress.show(workspace, cx))?;
+                    let installation = async {
+                        let artifact = managed_agent::acquire_artifact(
+                            http_client,
+                            &release,
+                            |downloaded_bytes, total_bytes| {
+                                cx.update(|_, app| {
+                                    progress.set_state(
+                                        managed_agent::ManagedAgentProgress::Downloading {
+                                            downloaded_bytes,
+                                            total_bytes,
+                                        },
+                                        app,
+                                    )
+                                })
+                                .log_err();
+                            },
+                        )
+                        .await?;
+                        let stage = proto_client
+                            .request(proto::StageManagedAgentInstallation {
+                                agent: agent.to_string(),
+                                version: release.version.clone(),
+                            })
+                            .await?;
+                        cx.update(|_, app| {
+                            progress.set_state(managed_agent::ManagedAgentProgress::Uploading, app)
+                        })?;
+                        let upload = cx.update(|_, app| {
+                            remote_client.read(app).upload_file(
+                                artifact.path,
+                                util::paths::RemotePathBuf::new(stage.upload_path, path_style),
+                                app,
+                            )
+                        })?;
+                        upload.await?;
+                        cx.update(|_, app| {
+                            progress
+                                .set_state(managed_agent::ManagedAgentProgress::Installing, app)
+                        })?;
+                        anyhow::Ok(
+                            proto_client
+                                .request(proto::CommitManagedAgentInstallation {
+                                    agent: agent.to_string(),
+                                    version: release.version.clone(),
+                                    stage_id: stage.stage_id,
+                                    sha256: artifact.sha256,
+                                })
+                                .await?
+                                .executable_path,
+                        )
+                    }
+                    .await;
+                    workspace
+                        .update(cx, |workspace, cx| progress.dismiss(workspace, cx))
+                        .log_err();
+                    installation?
                 }
                 1 if !installed.executable_path.is_empty() => installed.executable_path,
                 _ => return Ok(None),
@@ -2549,6 +2590,7 @@ impl AgentPanel {
                     remote_client,
                     http_client,
                     egress_manager,
+                    workspace.clone(),
                     cx,
                 )
                 .await

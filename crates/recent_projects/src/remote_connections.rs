@@ -41,6 +41,30 @@ impl RemoteSettings {
         self.ssh_connections.clone().0.into_iter()
     }
 
+    pub fn agent_route_for(
+        &self,
+        options: &RemoteConnectionOptions,
+    ) -> Option<settings::RemoteAgentRoute> {
+        let remote::RemoteConnectionIdentity::Ssh {
+            host,
+            username,
+            port,
+        } = remote::remote_connection_identity(options)
+        else {
+            return None;
+        };
+        Some(
+            self.ssh_connections
+                .0
+                .iter()
+                .find(|saved| {
+                    saved.host == host && saved.username == username && saved.port == port
+                })
+                .map(settings::SshConnection::effective_agent_route)
+                .unwrap_or_default(),
+        )
+    }
+
     pub fn wsl_connections(&self) -> impl Iterator<Item = WslConnection> + use<> {
         self.wsl_connections.clone().0.into_iter()
     }

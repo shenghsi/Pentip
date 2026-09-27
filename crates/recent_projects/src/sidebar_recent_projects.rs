@@ -345,10 +345,13 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
             active: false,
         };
 
-        let icon = icon_for_remote_connection(match &workspace.location {
-            SerializedWorkspaceLocation::Local => None,
-            SerializedWorkspaceLocation::Remote(options) => Some(options),
-        });
+        let icon = icon_for_remote_connection(
+            match &workspace.location {
+                SerializedWorkspaceLocation::Local => None,
+                SerializedWorkspaceLocation::Remote(options) => Some(options),
+            },
+            cx,
+        );
 
         Some(
             ListItem::new(ix)
