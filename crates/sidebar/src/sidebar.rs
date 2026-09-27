@@ -119,6 +119,14 @@ enum NewEntryTarget {
     Terminal,
 }
 
+#[derive(Clone, Copy)]
+enum AgentCli {
+    Codex,
+    Claude,
+    Pi,
+    Antigravity,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct SerializedSidebar {
     #[serde(default)]
@@ -2671,6 +2679,36 @@ impl Sidebar {
                         .filter(|workspace| open_workspaces.contains(workspace))
                         .cloned()
                         .or_else(|| open_workspaces.first().cloned());
+
+                    if let Some(workspace) = base_workspace.clone() {
+                        menu = menu.separator().header("Agent CLI");
+                        for (label, icon, agent_cli) in [
+                            ("Codex CLI", IconName::AiOpenAi, AgentCli::Codex),
+                            ("Claude CLI", IconName::AiClaude, AgentCli::Claude),
+                            ("Pi CLI", IconName::AiPi, AgentCli::Pi),
+                            (
+                                "Antigravity CLI",
+                                IconName::AiAntigravity,
+                                AgentCli::Antigravity,
+                            ),
+                        ] {
+                            let this = this.clone();
+                            let workspace = workspace.clone();
+                            let key = key.clone();
+                            menu = menu.item(ContextMenuEntry::new(label).icon(icon).handler(
+                                move |window, cx| {
+                                    this.update(cx, |sidebar, cx| {
+                                        sidebar.set_group_expanded(&key, true, cx);
+                                        sidebar.selection = None;
+                                        sidebar.create_new_agent_cli_terminal(
+                                            &workspace, agent_cli, window, cx,
+                                        );
+                                    })
+                                    .ok();
+                                },
+                            ));
+                        }
+                    }
 
                     // Only offer worktree creation when the base project can
                     // actually create one; otherwise the submenu would expand to
@@ -7009,6 +7047,58 @@ impl Sidebar {
             if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                 panel.update(cx, |panel, cx| {
                     panel.new_terminal(Some(workspace), AgentThreadSource::Sidebar, window, cx);
+                });
+            }
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+    }
+
+    fn create_new_agent_cli_terminal(
+        &mut self,
+        workspace: &Entity<Workspace>,
+        agent_cli: AgentCli,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if workspace_path_list(workspace, cx).paths().is_empty() {
+            return;
+        }
+
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return;
+        };
+
+        multi_workspace.update(cx, |multi_workspace, cx| {
+            multi_workspace.activate(workspace.clone(), None, window, cx);
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                panel.update(cx, |panel, cx| match agent_cli {
+                    AgentCli::Codex => panel.new_codex_terminal(
+                        Some(workspace),
+                        AgentThreadSource::Sidebar,
+                        window,
+                        cx,
+                    ),
+                    AgentCli::Claude => panel.new_claude_terminal(
+                        Some(workspace),
+                        AgentThreadSource::Sidebar,
+                        window,
+                        cx,
+                    ),
+                    AgentCli::Pi => panel.new_pi_terminal(
+                        Some(workspace),
+                        AgentThreadSource::Sidebar,
+                        window,
+                        cx,
+                    ),
+                    AgentCli::Antigravity => panel.new_agy_terminal(
+                        Some(workspace),
+                        AgentThreadSource::Sidebar,
+                        window,
+                        cx,
+                    ),
                 });
             }
             workspace.focus_panel::<AgentPanel>(window, cx);
