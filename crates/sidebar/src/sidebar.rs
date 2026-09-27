@@ -2294,21 +2294,14 @@ impl Sidebar {
         &self,
         ix: usize,
         host: Option<&RemoteConnectionOptions>,
+        cx: &App,
     ) -> Option<AnyElement> {
-        let remote_icon_per_type = match host? {
-            RemoteConnectionOptions::Wsl(_) => IconName::Linux,
-            RemoteConnectionOptions::Docker(_) => IconName::Box,
-            _ => IconName::Server,
-        };
+        let icon = recent_projects::icon_for_remote_connection(Some(host?), cx);
 
         Some(
             div()
                 .id(format!("remote-project-icon-{}", ix))
-                .child(
-                    Icon::new(remote_icon_per_type)
-                        .size(IconSize::XSmall)
-                        .color(Color::Muted),
-                )
+                .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
                 .tooltip(Tooltip::text("Remote Project"))
                 .into_any_element(),
         )
@@ -2414,7 +2407,7 @@ impl Sidebar {
                     .gap_1()
                     .child(label)
                     .when_some(
-                        self.render_remote_project_icon(ix, host.as_ref()),
+                        self.render_remote_project_icon(ix, host.as_ref(), cx),
                         |this, icon| this.child(icon),
                     )
                     .when(is_collapsed, |this| {
