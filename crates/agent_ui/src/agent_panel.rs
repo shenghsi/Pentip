@@ -1437,8 +1437,7 @@ async fn prepare_managed_remote_command(
                         })?;
                         upload.await?;
                         cx.update(|_, app| {
-                            progress
-                                .set_state(managed_agent::ManagedAgentProgress::Installing, app)
+                            progress.set_state(managed_agent::ManagedAgentProgress::Installing, app)
                         })?;
                         anyhow::Ok(
                             proto_client
@@ -2416,7 +2415,7 @@ impl AgentPanel {
         self.spawn_agent_cli_terminal(working_directory, "Antigravity", "agy", source, window, cx);
     }
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     fn spawn_agent_cli_terminal(
         &mut self,
         working_directory: Option<PathBuf>,
@@ -2447,7 +2446,7 @@ impl AgentPanel {
         );
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn spawn_agent_cli_terminal(
         &mut self,
         working_directory: Option<PathBuf>,

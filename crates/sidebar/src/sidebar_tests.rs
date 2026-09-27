@@ -2137,6 +2137,51 @@ async fn test_terminal_metadata_is_deduped_across_project_groups(cx: &mut TestAp
 }
 
 #[gpui::test]
+async fn test_sidebar_can_start_each_agent_cli(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    cx.update(|cx| {
+        cx.update_flags(true, vec!["agent-panel-terminal".to_string()]);
+    });
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    let workspace = multi_workspace.read_with(cx, |multi_workspace, _cx| {
+        multi_workspace.workspace().clone()
+    });
+    cx.run_until_parked();
+    assert!(workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .project()
+            .read(cx)
+            .visible_worktrees(cx)
+            .next()
+            .is_some()
+    }));
+    assert!(panel.read_with(cx, |panel, cx| panel.supports_terminal(cx)));
+
+    for agent_cli in [
+        AgentCli::Codex,
+        AgentCli::Claude,
+        AgentCli::Pi,
+        AgentCli::Antigravity,
+    ] {
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.create_new_agent_cli_terminal(&workspace, agent_cli, window, cx);
+        });
+    }
+
+    let mut programs = cx.update(|_, cx| {
+        TerminalThreadMetadataStore::global(cx)
+            .read(cx)
+            .entries()
+            .filter_map(|metadata| metadata.agent_cli.clone())
+            .collect::<Vec<_>>()
+    });
+    programs.sort();
+    assert_eq!(programs, ["agy", "claude", "codex", "pi"]);
+}
+
+#[gpui::test]
 async fn test_agent_panel_terminal_shows_project_and_linked_worktree(cx: &mut TestAppContext) {
     agent_ui::test_support::init_test(cx);
     cx.update(|cx| {
