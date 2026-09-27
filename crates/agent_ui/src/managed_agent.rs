@@ -1,12 +1,20 @@
 use anyhow::{Context as _, Result, bail};
 use async_compression::futures::bufread::GzipDecoder;
 use futures::{AsyncReadExt as _, AsyncWriteExt as _, TryStreamExt as _};
+use gpui::{App, AppContext as _, Entity, SharedString};
 use http_client::{AsyncBody, HttpClient};
 use remote::{RemoteArch, RemoteOs, RemotePlatform};
 use sha2::{Digest as _, Sha256};
 use std::{
+    cell::Cell,
     path::{Component, Path, PathBuf},
+    rc::Rc,
     sync::Arc,
+};
+use ui::{Color, Label, LabelSize, ProgressBar, SpinnerLabel, prelude::*};
+use workspace::{
+    Workspace,
+    notifications::{NotificationId, simple_message_notification::MessageNotification},
 };
 
 const MAX_METADATA_BYTES: u64 = 2 * 1024 * 1024;
@@ -190,9 +198,128 @@ async fn get_text(http_client: &Arc<dyn HttpClient>, url: &str) -> Result<String
     Ok(String::from_utf8(bytes)?)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagedAgentProgress {
+    Preparing,
+    Downloading {
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+    },
+    Uploading,
+    Installing,
+}
+
+pub struct ManagedAgentProgressNotification {
+    id: NotificationId,
+    state: Rc<Cell<ManagedAgentProgress>>,
+    notification: Entity<MessageNotification>,
+}
+
+impl ManagedAgentProgressNotification {
+    pub fn new(agent: &str, version: &str, cx: &mut App) -> Self {
+        let state = Rc::new(Cell::new(ManagedAgentProgress::Preparing));
+        let notification = cx.new(|cx| {
+            let state = state.clone();
+            MessageNotification::new_from_builder(cx, move |_, cx| {
+                render_progress(state.get(), cx)
+            })
+            .with_title(format!("Installing {agent} {version} on the remote device"))
+            .show_close_button(false)
+            .show_suppress_button(false)
+        });
+        Self {
+            id: NotificationId::composite::<Self>(SharedString::from(format!(
+                "{agent}-{version}"
+            ))),
+            state,
+            notification,
+        }
+    }
+
+    pub fn show(&self, workspace: &mut Workspace, cx: &mut gpui::Context<Workspace>) {
+        let notification = self.notification.clone();
+        workspace.show_notification(self.id.clone(), cx, |_| notification);
+    }
+
+    pub fn dismiss(&self, workspace: &mut Workspace, cx: &mut gpui::Context<Workspace>) {
+        workspace.dismiss_notification(&self.id, cx);
+    }
+
+    pub fn set_state(&self, state: ManagedAgentProgress, cx: &mut App) {
+        self.state.set(state);
+        self.notification.update(cx, |_, cx| cx.notify());
+    }
+}
+
+fn render_progress(state: ManagedAgentProgress, cx: &App) -> gpui::AnyElement {
+    let spinner = |label: &'static str| {
+        h_flex()
+            .gap_2()
+            .child(SpinnerLabel::new().size(LabelSize::Small))
+            .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
+            .into_any_element()
+    };
+    match state {
+        ManagedAgentProgress::Preparing => spinner("Preparing download"),
+        ManagedAgentProgress::Uploading => spinner("Uploading to the remote device"),
+        ManagedAgentProgress::Installing => spinner("Installing and verifying"),
+        ManagedAgentProgress::Downloading {
+            downloaded_bytes,
+            total_bytes: Some(total_bytes),
+        } => v_flex()
+            .gap_1()
+            .child(ProgressBar::new(
+                "managed-agent-download-progress",
+                downloaded_bytes as f32,
+                total_bytes.max(1) as f32,
+                cx,
+            ))
+            .child(
+                Label::new(format!(
+                    "Downloading: {} / {}",
+                    format_bytes(downloaded_bytes),
+                    format_bytes(total_bytes)
+                ))
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            )
+            .into_any_element(),
+        ManagedAgentProgress::Downloading {
+            downloaded_bytes,
+            total_bytes: None,
+        } => h_flex()
+            .gap_2()
+            .child(SpinnerLabel::new().size(LabelSize::Small))
+            .child(
+                Label::new(format!("Downloaded {}", format_bytes(downloaded_bytes)))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .into_any_element(),
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KILOBYTE: f64 = 1_000.0;
+    const MEGABYTE: f64 = 1_000_000.0;
+    const GIGABYTE: f64 = 1_000_000_000.0;
+
+    let bytes = bytes as f64;
+    if bytes >= GIGABYTE {
+        format!("{:.1} GB", bytes / GIGABYTE)
+    } else if bytes >= MEGABYTE {
+        format!("{:.1} MB", bytes / MEGABYTE)
+    } else if bytes >= KILOBYTE {
+        format!("{:.1} KB", bytes / KILOBYTE)
+    } else {
+        format!("{bytes:.0} B")
+    }
+}
+
 pub async fn acquire_artifact(
     http_client: Arc<dyn HttpClient>,
     release: &AgentRelease,
+    mut report_download_progress: impl FnMut(u64, Option<u64>),
 ) -> Result<VerifiedAgentArtifact> {
     let cache_directory = paths::data_dir()
         .join("managed_agent_cache")
@@ -212,10 +339,20 @@ pub async fn acquire_artifact(
         if !response.status().is_success() {
             bail!("agent download returned HTTP {}", response.status());
         }
+        let total_bytes = response
+            .headers()
+            .get("content-length")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
         let partial_path = cache_directory.join(format!("source-{}.partial", uuid::Uuid::new_v4()));
-        let result =
-            write_verified_response(response.into_body(), &partial_path, &release.source_sha256)
-                .await;
+        let result = write_verified_response(
+            response.into_body(),
+            &partial_path,
+            &release.source_sha256,
+            total_bytes,
+            &mut report_download_progress,
+        )
+        .await;
         if let Err(error) = result {
             if let Err(cleanup_error) = smol::fs::remove_file(&partial_path).await {
                 log::warn!("failed to remove partial agent download: {cleanup_error}");
@@ -249,8 +386,13 @@ async fn write_verified_response(
     mut body: AsyncBody,
     destination: &Path,
     expected_sha256: &str,
+    total_bytes: Option<u64>,
+    report_progress: &mut impl FnMut(u64, Option<u64>),
 ) -> Result<()> {
+    const UNKNOWN_TOTAL_REPORT_INTERVAL: u64 = 1024 * 1024;
+
     let mut file = smol::fs::File::create(destination).await?;
+    let mut last_reported_bucket = None;
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     let mut bytes = 0_u64;
@@ -267,6 +409,17 @@ async fn write_verified_response(
         }
         digest.update(&buffer[..length]);
         file.write_all(&buffer[..length]).await?;
+        // Report once per percentage point (or per MiB when the size is unknown) so that
+        // the notification does not rerender for every 64 KiB chunk.
+        let bucket = match total_bytes {
+            Some(0) => 100,
+            Some(total_bytes) => (bytes as u128 * 100 / total_bytes as u128).min(100) as u64,
+            None => bytes / UNKNOWN_TOTAL_REPORT_INTERVAL,
+        };
+        if last_reported_bucket != Some(bucket) {
+            last_reported_bucket = Some(bucket);
+            report_progress(bytes, total_bytes);
+        }
     }
     file.flush().await?;
     file.sync_all().await?;

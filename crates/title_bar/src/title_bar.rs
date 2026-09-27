@@ -596,19 +596,16 @@ impl TitleBar {
 
         let options = self.project.read(cx).remote_connection_options(cx)?;
         let host: SharedString = options.display_name().into();
+        let icon = recent_projects::icon_for_remote_connection(Some(&options), cx);
 
-        let (nickname, tooltip_title, icon) = match options {
-            RemoteConnectionOptions::Ssh(options) => (
-                options.nickname.map(|nick| nick.into()),
-                "Remote Project",
-                IconName::Server,
-            ),
-            RemoteConnectionOptions::Wsl(_) => (None, "Remote Project", IconName::Linux),
-            RemoteConnectionOptions::Docker(_dev_container_connection) => {
-                (None, "Dev Container", IconName::Box)
+        let (nickname, tooltip_title) = match options {
+            RemoteConnectionOptions::Ssh(options) => {
+                (options.nickname.map(|nick| nick.into()), "Remote Project")
             }
+            RemoteConnectionOptions::Wsl(_) => (None, "Remote Project"),
+            RemoteConnectionOptions::Docker(_dev_container_connection) => (None, "Dev Container"),
             #[cfg(any(test, feature = "test-support"))]
-            RemoteConnectionOptions::Mock(_) => (None, "Mock Remote Project", IconName::Server),
+            RemoteConnectionOptions::Mock(_) => (None, "Mock Remote Project"),
         };
 
         let nickname = nickname.unwrap_or_else(|| host.clone());
