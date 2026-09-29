@@ -1467,6 +1467,7 @@ async fn prepare_managed_remote_command(
     let allowed_hosts: &'static [&'static str] = match agent {
         "codex" => &["api.openai.com", "auth.openai.com", "chatgpt.com"],
         "claude" => &["api.anthropic.com", "claude.ai", "platform.claude.com"],
+        "pi" | "agy" => &["*"],
         _ => anyhow::bail!("unsupported managed remote agent"),
     };
     let executor = cx.update(|_, app| app.background_executor().clone())?;
@@ -1496,8 +1497,13 @@ async fn prepare_managed_remote_command(
     } else {
         ""
     };
+    let agy_update_policy = if agent == "agy" {
+        "AGY_CLI_DISABLE_AUTO_UPDATE=true "
+    } else {
+        ""
+    };
     let environment = format!(
-        "{claude_update_policy}HTTPS_PROXY={quoted_proxy} HTTP_PROXY={quoted_proxy} \
+        "{claude_update_policy}{agy_update_policy}HTTPS_PROXY={quoted_proxy} HTTP_PROXY={quoted_proxy} \
          https_proxy={quoted_proxy} http_proxy={quoted_proxy} NO_PROXY=localhost,127.0.0.1"
     );
     let managed_command = if let Some(arguments) = arguments {
@@ -2558,6 +2564,8 @@ impl AgentPanel {
             .and_then(|agent| match agent {
                 "codex" => Some("codex"),
                 "claude" => Some("claude"),
+                "pi" => Some("pi"),
+                "agy" => Some("agy"),
                 _ => None,
             })
             .and_then(|agent| {

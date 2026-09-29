@@ -1,13 +1,12 @@
 use anyhow::{Context as _, Result, bail};
-use async_compression::futures::bufread::GzipDecoder;
-use futures::{AsyncReadExt as _, AsyncWriteExt as _, TryStreamExt as _};
+use futures::{AsyncReadExt as _, AsyncWriteExt as _};
 use gpui::{App, AppContext as _, Entity, SharedString};
 use http_client::{AsyncBody, HttpClient};
 use remote::{RemoteArch, RemoteOs, RemotePlatform};
-use sha2::{Digest as _, Sha256};
+use sha2::{Digest as _, Sha256, Sha512};
 use std::{
     cell::Cell,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
 };
@@ -24,8 +23,21 @@ pub struct AgentRelease {
     pub agent: &'static str,
     pub version: String,
     pub source_url: String,
-    pub source_sha256: String,
-    archive_executable: Option<String>,
+    source_checksum: SourceChecksum,
+    package_archive: bool,
+}
+
+enum SourceChecksum {
+    Sha256(String),
+    Sha512(String),
+}
+
+impl SourceChecksum {
+    fn value(&self) -> &str {
+        match self {
+            Self::Sha256(value) | Self::Sha512(value) => value,
+        }
+    }
 }
 
 pub struct VerifiedAgentArtifact {
@@ -41,6 +53,8 @@ pub async fn latest_release(
     match agent {
         "codex" => codex_release(http_client, platform).await,
         "claude" => claude_release(http_client, platform).await,
+        "pi" => pi_release(http_client, platform).await,
+        "agy" => agy_release(http_client, platform).await,
         _ => bail!("unsupported managed agent"),
     }
 }
@@ -80,18 +94,13 @@ async fn codex_release(
         (RemoteOs::Windows, RemoteArch::X86_64) => "x86_64-pc-windows-msvc",
         (RemoteOs::Windows, RemoteArch::Aarch64) => "aarch64-pc-windows-msvc",
     };
-    let executable_name = format!("codex-{target}");
-    let asset_name = if platform.os.is_windows() {
-        format!("{executable_name}.exe")
-    } else {
-        format!("{executable_name}.tar.gz")
-    };
+    let asset_name = format!("codex-package-{target}.tar.gz");
     let asset = metadata["assets"]
         .as_array()
         .context("Codex release has no assets")?
         .iter()
         .find(|asset| asset["name"] == asset_name)
-        .context("Codex release has no asset for the remote platform")?;
+        .context("Codex release has no package for the remote platform")?;
     let source_url = asset["browser_download_url"]
         .as_str()
         .context("Codex asset has no URL")?;
@@ -109,8 +118,8 @@ async fn codex_release(
         agent: "codex",
         version: version.to_string(),
         source_url: source_url.to_string(),
-        source_sha256: source_sha256.to_ascii_lowercase(),
-        archive_executable: (!platform.os.is_windows()).then_some(executable_name),
+        source_checksum: SourceChecksum::Sha256(source_sha256.to_ascii_lowercase()),
+        package_archive: true,
     })
 }
 
@@ -156,8 +165,97 @@ async fn claude_release(
         source_url: format!(
             "https://downloads.claude.ai/claude-code-releases/{version}/{target}/{binary}"
         ),
-        source_sha256: source_sha256.to_ascii_lowercase(),
-        archive_executable: None,
+        source_checksum: SourceChecksum::Sha256(source_sha256.to_ascii_lowercase()),
+        package_archive: false,
+    })
+}
+
+async fn pi_release(
+    http_client: Arc<dyn HttpClient>,
+    platform: RemotePlatform,
+) -> Result<AgentRelease> {
+    let metadata = get_json(
+        &http_client,
+        "https://api.github.com/repos/earendil-works/pi/releases/latest",
+    )
+    .await?;
+    let tag = metadata["tag_name"]
+        .as_str()
+        .context("Pi release has no tag")?;
+    let version = tag.strip_prefix('v').context("unexpected Pi release tag")?;
+    validate_version(version)?;
+    let target = match (platform.os, platform.arch) {
+        (RemoteOs::Linux, RemoteArch::X86_64) => "linux-x64",
+        (RemoteOs::Linux, RemoteArch::Aarch64) => "linux-arm64",
+        (RemoteOs::MacOs, RemoteArch::X86_64) => "darwin-x64",
+        (RemoteOs::MacOs, RemoteArch::Aarch64) => "darwin-arm64",
+        _ => bail!("Pi managed remote installation requires a Linux or macOS host"),
+    };
+    let asset_name = format!("pi-{target}.tar.gz");
+    let asset = metadata["assets"]
+        .as_array()
+        .context("Pi release has no assets")?
+        .iter()
+        .find(|asset| asset["name"] == asset_name)
+        .context("Pi release has no archive for the remote platform")?;
+    let source_url = asset["browser_download_url"]
+        .as_str()
+        .context("Pi asset has no URL")?;
+    if !source_url.starts_with("https://github.com/earendil-works/pi/releases/download/") {
+        bail!("Pi asset URL is outside the official release host");
+    }
+    let source_sha256 = asset["digest"]
+        .as_str()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .context("Pi asset has no SHA-256 digest")?;
+    validate_digest(source_sha256)?;
+    Ok(AgentRelease {
+        agent: "pi",
+        version: version.to_string(),
+        source_url: source_url.to_string(),
+        source_checksum: SourceChecksum::Sha256(source_sha256.to_ascii_lowercase()),
+        package_archive: true,
+    })
+}
+
+async fn agy_release(
+    http_client: Arc<dyn HttpClient>,
+    platform: RemotePlatform,
+) -> Result<AgentRelease> {
+    let target = match (platform.os, platform.arch) {
+        (RemoteOs::Linux, RemoteArch::X86_64) => "linux_amd64",
+        (RemoteOs::Linux, RemoteArch::Aarch64) => "linux_arm64",
+        (RemoteOs::MacOs, RemoteArch::X86_64) => "darwin_amd64",
+        (RemoteOs::MacOs, RemoteArch::Aarch64) => "darwin_arm64",
+        _ => bail!("Antigravity managed remote installation requires a Linux or macOS host"),
+    };
+    let manifest_url = format!(
+        "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{target}.json"
+    );
+    let manifest = get_json(&http_client, &manifest_url).await?;
+    let version = manifest["version"]
+        .as_str()
+        .context("Antigravity release has no version")?;
+    validate_version(version)?;
+    let source_url = manifest["url"]
+        .as_str()
+        .context("Antigravity release has no URL")?;
+    if !source_url.starts_with("https://storage.googleapis.com/antigravity-public/antigravity-cli/")
+    {
+        bail!("Antigravity asset URL is outside the official release host");
+    }
+    let source_sha512 = manifest["sha512"]
+        .as_str()
+        .context("Antigravity release has no SHA-512 digest")?;
+    if source_sha512.len() != 128 || !source_sha512.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("invalid Antigravity release checksum");
+    }
+    Ok(AgentRelease {
+        agent: "agy",
+        version: version.to_string(),
+        source_url: source_url.to_string(),
+        source_checksum: SourceChecksum::Sha512(source_sha512.to_ascii_lowercase()),
+        package_archive: true,
     })
 }
 
@@ -220,17 +318,13 @@ impl ManagedAgentProgressNotification {
         let state = Rc::new(Cell::new(ManagedAgentProgress::Preparing));
         let notification = cx.new(|cx| {
             let state = state.clone();
-            MessageNotification::new_from_builder(cx, move |_, cx| {
-                render_progress(state.get(), cx)
-            })
-            .with_title(format!("Installing {agent} {version} on the remote device"))
-            .show_close_button(false)
-            .show_suppress_button(false)
+            MessageNotification::new_from_builder(cx, move |_, cx| render_progress(state.get(), cx))
+                .with_title(format!("Installing {agent} {version} on the remote device"))
+                .show_close_button(false)
+                .show_suppress_button(false)
         });
         Self {
-            id: NotificationId::composite::<Self>(SharedString::from(format!(
-                "{agent}-{version}"
-            ))),
+            id: NotificationId::composite::<Self>(SharedString::from(format!("{agent}-{version}"))),
             state,
             notification,
         }
@@ -323,7 +417,7 @@ pub async fn acquire_artifact(
 ) -> Result<VerifiedAgentArtifact> {
     let cache_directory = paths::data_dir()
         .join("managed_agent_cache")
-        .join(&release.source_sha256);
+        .join(release.source_checksum.value());
     smol::fs::create_dir_all(&cache_directory).await?;
     let executable_name = if cfg!(windows) {
         format!("{}.exe", release.agent)
@@ -332,7 +426,9 @@ pub async fn acquire_artifact(
     };
     let executable_path = cache_directory.join(executable_name);
     let source_path = cache_directory.join("source");
-    if !source_path.exists() || file_sha256(&source_path).await? != release.source_sha256 {
+    if !source_path.exists()
+        || !file_matches_checksum(&source_path, &release.source_checksum).await?
+    {
         let response = http_client
             .get(&release.source_url, AsyncBody::empty(), true)
             .await?;
@@ -348,7 +444,7 @@ pub async fn acquire_artifact(
         let result = write_verified_response(
             response.into_body(),
             &partial_path,
-            &release.source_sha256,
+            &release.source_checksum,
             total_bytes,
             &mut report_download_progress,
         )
@@ -361,15 +457,18 @@ pub async fn acquire_artifact(
         }
         smol::fs::rename(&partial_path, &source_path).await?;
     }
+    if release.package_archive {
+        let sha256 = file_sha256(&source_path).await?;
+        return Ok(VerifiedAgentArtifact {
+            path: source_path,
+            sha256,
+        });
+    }
     let temporary_executable =
         cache_directory.join(format!("executable-{}.partial", uuid::Uuid::new_v4()));
-    if let Some(archive_executable) = &release.archive_executable {
-        extract_tar_executable(&source_path, &temporary_executable, archive_executable).await?;
-    } else {
-        smol::fs::copy(&source_path, &temporary_executable).await?;
-    }
+    smol::fs::copy(&source_path, &temporary_executable).await?;
     let sha256 = file_sha256(&temporary_executable).await?;
-    if release.archive_executable.is_none() && sha256 != release.source_sha256 {
+    if sha256 != file_sha256(&source_path).await? {
         bail!("cached agent executable checksum did not match the release");
     }
     if executable_path.exists() {
@@ -385,7 +484,7 @@ pub async fn acquire_artifact(
 async fn write_verified_response(
     mut body: AsyncBody,
     destination: &Path,
-    expected_sha256: &str,
+    expected_checksum: &SourceChecksum,
     total_bytes: Option<u64>,
     report_progress: &mut impl FnMut(u64, Option<u64>),
 ) -> Result<()> {
@@ -393,7 +492,8 @@ async fn write_verified_response(
 
     let mut file = smol::fs::File::create(destination).await?;
     let mut last_reported_bucket = None;
-    let mut digest = Sha256::new();
+    let mut sha256_digest = Sha256::new();
+    let mut sha512_digest = Sha512::new();
     let mut buffer = [0_u8; 64 * 1024];
     let mut bytes = 0_u64;
     loop {
@@ -407,7 +507,8 @@ async fn write_verified_response(
         if bytes > MAX_ARTIFACT_BYTES {
             bail!("agent download is too large");
         }
-        digest.update(&buffer[..length]);
+        sha256_digest.update(&buffer[..length]);
+        sha512_digest.update(&buffer[..length]);
         file.write_all(&buffer[..length]).await?;
         // Report once per percentage point (or per MiB when the size is unknown) so that
         // the notification does not rerender for every 64 KiB chunk.
@@ -423,45 +524,14 @@ async fn write_verified_response(
     }
     file.flush().await?;
     file.sync_all().await?;
-    if format!("{:x}", digest.finalize()) != expected_sha256 {
+    let sha256 = format!("{:x}", sha256_digest.finalize());
+    let sha512 = format!("{:x}", sha512_digest.finalize());
+    let matches = match expected_checksum {
+        SourceChecksum::Sha256(expected) => &sha256 == expected,
+        SourceChecksum::Sha512(expected) => &sha512 == expected,
+    };
+    if !matches {
         bail!("downloaded agent checksum did not match release metadata");
-    }
-    Ok(())
-}
-
-async fn extract_tar_executable(
-    source: &Path,
-    destination: &Path,
-    executable_name: &str,
-) -> Result<()> {
-    let source = smol::fs::File::open(source).await?;
-    let decompressed = GzipDecoder::new(futures::io::BufReader::new(source));
-    let mut entries = async_tar::Archive::new(decompressed).entries()?;
-    let mut found = false;
-    while let Some(entry) = entries.try_next().await? {
-        let path = entry.path()?.into_owned();
-        if path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            bail!("agent archive contains an unsafe path");
-        }
-        if path.to_string_lossy() == executable_name {
-            if found || !entry.header().entry_type().is_file() {
-                bail!("agent archive has an invalid executable entry");
-            }
-            let mut output = smol::fs::File::create(destination).await?;
-            let mut bounded_entry = entry.take(MAX_ARTIFACT_BYTES + 1);
-            if futures::io::copy(&mut bounded_entry, &mut output).await? > MAX_ARTIFACT_BYTES {
-                bail!("agent executable is too large");
-            }
-            output.flush().await?;
-            output.sync_all().await?;
-            found = true;
-        }
-    }
-    if !found {
-        bail!("agent archive does not contain its executable");
     }
     Ok(())
 }
@@ -478,4 +548,23 @@ async fn file_sha256(path: &Path) -> Result<String> {
         digest.update(&buffer[..length]);
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+async fn file_matches_checksum(path: &Path, checksum: &SourceChecksum) -> Result<bool> {
+    match checksum {
+        SourceChecksum::Sha256(expected) => Ok(file_sha256(path).await? == *expected),
+        SourceChecksum::Sha512(expected) => {
+            let mut file = smol::fs::File::open(path).await?;
+            let mut digest = Sha512::new();
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let length = file.read(&mut buffer).await?;
+                if length == 0 {
+                    break;
+                }
+                digest.update(&buffer[..length]);
+            }
+            Ok(format!("{:x}", digest.finalize()) == *expected)
+        }
+    }
 }
