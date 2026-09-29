@@ -3,6 +3,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use collections::HashMap;
 use futures::{AsyncReadExt as _, AsyncWriteExt as _, FutureExt as _};
 use gpui::BackgroundExecutor;
+use http_proxy::PinnedHost;
 use parking_lot::Mutex;
 use smol::net::{TcpListener, TcpStream};
 use std::{
@@ -197,12 +198,12 @@ async fn handle_connection(
             return Err(error);
         }
     };
-    let capability_shutdown = authorize_request(&request, capabilities).map_err(|error| {
+    let authorization = authorize_request(&request, capabilities).map_err(|error| {
         log::debug!("agent CONNECT proxy rejected a request: {error:#}");
         error
     });
-    let capability_shutdown = match capability_shutdown {
-        Ok(shutdown) => shutdown,
+    let (capability_shutdown, allow_public_hosts) = match authorization {
+        Ok(authorization) => authorization,
         Err(error) => {
             client
                 .write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
@@ -211,9 +212,28 @@ async fn handle_connection(
         }
     };
 
-    let upstream = TcpStream::connect((request.host.as_str(), request.port))
-        .await
-        .with_context(|| format!("failed to connect approved host {}", request.host))?;
+    let upstream = if allow_public_hosts {
+        let host = request.host.clone();
+        let port = request.port;
+        let pinned_host = smol::unblock(move || PinnedHost::resolve(&host, port)).await?;
+        let mut upstream = None;
+        for address in pinned_host.socket_addrs() {
+            match TcpStream::connect(address).await {
+                Ok(connection) => {
+                    upstream = Some(connection);
+                    break;
+                }
+                Err(error) => {
+                    log::debug!("failed to connect approved address {address}: {error}");
+                }
+            }
+        }
+        upstream.context("failed to connect approved public host")?
+    } else {
+        TcpStream::connect((request.host.as_str(), request.port))
+            .await
+            .with_context(|| format!("failed to connect approved host {}", request.host))?
+    };
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
@@ -306,7 +326,7 @@ fn parse_request(headers: &str) -> Result<ConnectRequest> {
 fn authorize_request(
     request: &ConnectRequest,
     capabilities: &CapabilityRegistry,
-) -> Result<async_channel::Receiver<()>> {
+) -> Result<(async_channel::Receiver<()>, bool)> {
     let capabilities = capabilities.lock();
     let policy = capabilities
         .get(&request.authorization)
@@ -318,10 +338,13 @@ fn authorize_request(
     {
         anyhow::bail!("CONNECT host is not permitted");
     }
-    Ok(policy.shutdown.clone())
+    Ok((policy.shutdown.clone(), policy.allowed_hosts.contains(&"*")))
 }
 
 fn host_rule_matches(rule: &str, host: &str) -> bool {
+    if rule == "*" {
+        return true;
+    }
     let Some(suffix) = rule.strip_prefix("*.") else {
         return rule == host;
     };
@@ -401,6 +424,26 @@ mod tests {
             .expect("valid denied CONNECT request");
             assert!(authorize_request(&request, &capabilities).is_err());
         }
+    }
+
+    #[test]
+    fn public_host_rule_still_rejects_private_addresses() {
+        let (_, shutdown) = async_channel::bounded(1);
+        let capabilities = Arc::new(Mutex::new(HashMap::from_iter([(
+            "Basic expected".to_string(),
+            CapabilityPolicy {
+                allowed_hosts: &["*"],
+                shutdown,
+            },
+        )])));
+        let request = parse_request(
+            "CONNECT localhost:443 HTTP/1.1\r\nProxy-Authorization: Basic expected\r\n\r\n",
+        )
+        .expect("valid CONNECT request");
+        let (_, allow_public_hosts) = authorize_request(&request, &capabilities)
+            .expect("public host capability should accept a hostname");
+        assert!(allow_public_hosts);
+        assert!(PinnedHost::resolve(&request.host, request.port).is_err());
     }
 
     #[test]
