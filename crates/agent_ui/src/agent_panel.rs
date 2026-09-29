@@ -1360,7 +1360,14 @@ async fn prepare_managed_remote_command(
             agent: agent.to_string(),
         })
         .await?;
-    let release = match managed_agent::latest_release(http_client.clone(), agent, platform).await {
+    let release = match managed_agent::latest_release(
+        http_client.clone(),
+        agent,
+        platform,
+        installed.musl,
+    )
+    .await
+    {
         Ok(release) => Some(release),
         Err(error) if !installed.executable_path.is_empty() => {
             log::warn!("could not check for a newer {agent} release: {error:#}");
@@ -1369,7 +1376,10 @@ async fn prepare_managed_remote_command(
         Err(error) => return Err(error),
     };
     let executable_path = if let Some(release) = release {
-        if installed.version == release.version && !installed.executable_path.is_empty() {
+        if installed.version == release.version
+            && release.matches_installed_sha256(&installed.sha256)
+            && !installed.executable_path.is_empty()
+        {
             installed.executable_path
         } else {
             let message = if installed.executable_path.is_empty() {

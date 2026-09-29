@@ -85,6 +85,8 @@ message GetManagedAgentInstallation {
 message GetManagedAgentInstallationResponse {
   string version = 1;
   string executable_path = 2;
+  bool musl = 3;
+  string sha256 = 4;
 }
 
 message StageManagedAgentInstallation {
