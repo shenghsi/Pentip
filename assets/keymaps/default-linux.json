@@ -1299,6 +1299,7 @@
     "bindings": {
       "ctrl-f": "agent::ToggleSearch",
       "ctrl-n": "agent::NewThread",
+      "ctrl-/": ["terminal::SendText", "\u001b[47;5u"],
     },
   },
   {

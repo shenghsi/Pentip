@@ -1361,6 +1361,7 @@
     "bindings": {
       "cmd-f": "agent::ToggleSearch",
       "cmd-n": "agent::NewThread",
+      "ctrl-/": ["terminal::SendText", "\u001b[47;5u"],
     },
   },
   {
