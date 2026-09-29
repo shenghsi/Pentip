@@ -40,6 +40,19 @@ impl SourceChecksum {
     }
 }
 
+impl AgentRelease {
+    /// Returns false when the installed artifact is known to differ from this release,
+    /// for example after the release target for the host changed.
+    pub fn matches_installed_sha256(&self, installed_sha256: &str) -> bool {
+        match &self.source_checksum {
+            SourceChecksum::Sha256(value) if !installed_sha256.is_empty() => {
+                value.eq_ignore_ascii_case(installed_sha256)
+            }
+            _ => true,
+        }
+    }
+}
+
 pub struct VerifiedAgentArtifact {
     pub path: PathBuf,
     pub sha256: String,
@@ -49,10 +62,11 @@ pub async fn latest_release(
     http_client: Arc<dyn HttpClient>,
     agent: &'static str,
     platform: RemotePlatform,
+    musl: bool,
 ) -> Result<AgentRelease> {
     match agent {
         "codex" => codex_release(http_client, platform).await,
-        "claude" => claude_release(http_client, platform).await,
+        "claude" => claude_release(http_client, platform, musl).await,
         "pi" => pi_release(http_client, platform).await,
         "agy" => agy_release(http_client, platform).await,
         _ => bail!("unsupported managed agent"),
@@ -126,6 +140,7 @@ async fn codex_release(
 async fn claude_release(
     http_client: Arc<dyn HttpClient>,
     platform: RemotePlatform,
+    musl: bool,
 ) -> Result<AgentRelease> {
     let version = get_text(
         &http_client,
@@ -140,9 +155,12 @@ async fn claude_release(
     if manifest["version"] != version {
         bail!("Claude release manifest version does not match");
     }
+    // The musl builds of Claude are dynamically linked, so they need the musl loader.
     let target = match (platform.os, platform.arch) {
-        (RemoteOs::Linux, RemoteArch::X86_64) => "linux-x64-musl",
-        (RemoteOs::Linux, RemoteArch::Aarch64) => "linux-arm64-musl",
+        (RemoteOs::Linux, RemoteArch::X86_64) if musl => "linux-x64-musl",
+        (RemoteOs::Linux, RemoteArch::Aarch64) if musl => "linux-arm64-musl",
+        (RemoteOs::Linux, RemoteArch::X86_64) => "linux-x64",
+        (RemoteOs::Linux, RemoteArch::Aarch64) => "linux-arm64",
         (RemoteOs::MacOs, RemoteArch::X86_64) => "darwin-x64",
         (RemoteOs::MacOs, RemoteArch::Aarch64) => "darwin-arm64",
         (RemoteOs::Windows, RemoteArch::X86_64) => "win32-x64",

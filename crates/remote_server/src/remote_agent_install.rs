@@ -93,7 +93,28 @@ fn file_sha256(path: &Path) -> Result<String> {
 
 pub fn current(agent: &str) -> Result<proto::GetManagedAgentInstallationResponse> {
     let directory = agent_directory(agent)?;
-    current_in_directory(agent, &directory)
+    let mut installation = current_in_directory(agent, &directory)?;
+    installation.musl = host_uses_musl();
+    Ok(installation)
+}
+
+// Some musl agent builds (such as Claude) are dynamically linked against the musl
+// loader, so a glibc host without that loader cannot run them. Report musl only
+// when the host has no glibc loader.
+fn host_uses_musl() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    let has_loader = |prefix: &str| {
+        ["/lib", "/lib64"].iter().any(|directory| {
+            fs::read_dir(directory).is_ok_and(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .any(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
+            })
+        })
+    };
+    has_loader("ld-musl-") && !has_loader("ld-linux-")
 }
 
 fn current_in_directory(
@@ -138,6 +159,8 @@ fn current_in_directory(
     Ok(proto::GetManagedAgentInstallationResponse {
         version: receipt.version,
         executable_path: executable.to_string_lossy().into_owned(),
+        musl: false,
+        sha256: receipt.sha256,
     })
 }
 
