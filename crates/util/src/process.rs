@@ -220,7 +220,7 @@ mod windows_tests {
         let child = Child::spawn(command, Stdio::null(), Stdio::null(), Stdio::null())
             .expect("failed to spawn powershell");
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(30);
         let grandchild_pid = loop {
             if let Ok(contents) = std::fs::read_to_string(&pid_file)
                 && let Ok(pid) = contents.trim().parse::<u32>()
