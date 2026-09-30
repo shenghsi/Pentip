@@ -40,6 +40,30 @@ impl RemoteSettings {
         self.ssh_connections.clone().0.into_iter()
     }
 
+    pub fn agent_route_for(
+        &self,
+        options: &RemoteConnectionOptions,
+    ) -> Option<settings::RemoteAgentRoute> {
+        let remote::RemoteConnectionIdentity::Ssh {
+            host,
+            username,
+            port,
+        } = remote::remote_connection_identity(options)
+        else {
+            return None;
+        };
+        Some(
+            self.ssh_connections
+                .0
+                .iter()
+                .find(|saved| {
+                    saved.host == host && saved.username == username && saved.port == port
+                })
+                .map(settings::SshConnection::effective_agent_route)
+                .unwrap_or_default(),
+        )
+    }
+
     pub fn wsl_connections(&self) -> impl Iterator<Item = WslConnection> + use<> {
         self.wsl_connections.clone().0.into_iter()
     }
@@ -50,8 +74,9 @@ impl RemoteSettings {
                 && conn.username == options.username
                 && conn.port == options.port
             {
+                let upload_binary_over_ssh = conn.should_upload_binary_over_ssh();
                 options.nickname = conn.nickname;
-                options.upload_binary_over_ssh = conn.upload_binary_over_ssh.unwrap_or_default();
+                options.upload_binary_over_ssh = upload_binary_over_ssh;
                 options.args = Some(conn.args);
                 options.port_forwards = conn.port_forwards;
                 break;
@@ -507,8 +532,31 @@ mod tests {
     use remote::RemoteClient;
     use remote_server::{HeadlessAppState, HeadlessProject};
     use serde_json::json;
+    use settings::RemoteAgentRoute;
     use util::path;
     use workspace::find_existing_workspace;
+
+    #[test]
+    fn tunneled_ssh_uses_local_server_upload_when_filling_connection_options() {
+        let mut connection = SshConnection {
+            host: "build.example.com".into(),
+            ..Default::default()
+        };
+        let options_for = |connection: SshConnection| {
+            RemoteSettings {
+                ssh_connections: ExtendingVec(vec![connection]),
+                wsl_connections: ExtendingVec::default(),
+                read_ssh_config: false,
+            }
+            .connection_options_for("build.example.com".into(), None, None)
+        };
+        assert!(!options_for(connection.clone()).upload_binary_over_ssh);
+        connection.agent_route = Some(RemoteAgentRoute::Tunneled);
+        assert!(options_for(connection.clone()).upload_binary_over_ssh);
+        connection.agent_route = Some(RemoteAgentRoute::Direct);
+        connection.upload_binary_over_ssh = Some(true);
+        assert!(options_for(connection).upload_binary_over_ssh);
+    }
 
     #[gpui::test]
     async fn test_open_remote_project_with_mock_connection(

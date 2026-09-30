@@ -7,17 +7,20 @@ mod agent_registry_ui;
 mod buffer_codegen;
 mod completion_provider;
 mod config_options;
+mod connect_proxy;
 mod context;
 mod context_server_configuration;
 pub(crate) mod conversation_view;
 mod diagnostics;
 pub mod draft_prompt_store;
+mod egress;
 mod entry_view_state;
 mod external_source_prompt;
 mod favorite_models;
 mod inline_assistant;
 mod inline_prompt_editor;
 mod language_model_selector;
+mod managed_agent;
 mod mention_set;
 mod message_editor;
 mod mode_selector;
@@ -34,10 +37,8 @@ mod thread_import;
 pub mod thread_metadata_store;
 pub mod thread_worktree_archive;
 
-mod claude_thread_history;
 mod cli_thread_history;
 pub use cli_thread_history::save_agy_session;
-mod codex_thread_history;
 pub mod threads_archive_view;
 mod ui;
 mod unicode_confusables;
@@ -68,7 +69,10 @@ use prompt_store::{self, PromptBuilder, rules_to_skills_migration};
 use rope::Point;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use settings::{LanguageModelSelection, Settings as _, SettingsStore, SidebarSide};
+use settings::{
+    ExtendingVec, LanguageModelSelection, RegisterSetting, Settings as _, SettingsStore,
+    SidebarSide,
+};
 use std::any::TypeId;
 use std::path::{Path, PathBuf};
 use workspace::{OpenOptions, Workspace};
@@ -96,6 +100,50 @@ pub use thread_import::{
 };
 use zed_actions;
 pub use zed_actions::{CreateWorktree, NewWorktreeBranchTarget, SwitchWorktree};
+
+#[derive(RegisterSetting)]
+pub(crate) struct RemoteAgentRoutingSettings {
+    ssh_connections: ExtendingVec<settings::SshConnection>,
+}
+
+impl settings::Settings for RemoteAgentRoutingSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        Self {
+            ssh_connections: content
+                .remote
+                .ssh_connections
+                .clone()
+                .unwrap_or_default()
+                .into(),
+        }
+    }
+}
+
+impl RemoteAgentRoutingSettings {
+    pub(crate) fn route_for(
+        &self,
+        connection: &remote::RemoteConnectionOptions,
+    ) -> Option<settings::RemoteAgentRoute> {
+        let remote::RemoteConnectionIdentity::Ssh {
+            host,
+            username,
+            port,
+        } = remote::remote_connection_identity(connection)
+        else {
+            return None;
+        };
+        Some(
+            self.ssh_connections
+                .0
+                .iter()
+                .find(|saved| {
+                    saved.host == host && saved.username == username && saved.port == port
+                })
+                .map(settings::SshConnection::effective_agent_route)
+                .unwrap_or_default(),
+        )
+    }
+}
 
 pub(crate) fn resolve_agent_image(
     dest_url: &str,
@@ -599,6 +647,7 @@ pub fn init(
     is_eval: bool,
     cx: &mut App,
 ) {
+    RemoteAgentRoutingSettings::register(cx);
     agent::ThreadStore::init_global(cx);
     prompt_store::init(cx);
 

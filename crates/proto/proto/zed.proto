@@ -522,7 +522,15 @@ message Envelope {
     LanguageServerShowDocumentRequest language_server_show_document_request = 490;
     ExecuteLspCommand execute_lsp_command = 491;
     ExecuteLspCommandResponse execute_lsp_command_response = 492;
-    RefreshDocumentHighlights refresh_document_highlights = 493; // current max
+    RefreshDocumentHighlights refresh_document_highlights = 493;
+    GetRemoteAgentHistory get_remote_agent_history = 494;
+    GetRemoteAgentHistoryResponse get_remote_agent_history_response = 495;
+    GetManagedAgentInstallation get_managed_agent_installation = 496;
+    GetManagedAgentInstallationResponse get_managed_agent_installation_response = 497;
+    StageManagedAgentInstallation stage_managed_agent_installation = 498;
+    StageManagedAgentInstallationResponse stage_managed_agent_installation_response = 499;
+    CommitManagedAgentInstallation commit_managed_agent_installation = 500;
+    CommitManagedAgentInstallationResponse commit_managed_agent_installation_response = 501; // current max
   }
 
   reserved 87 to 88;

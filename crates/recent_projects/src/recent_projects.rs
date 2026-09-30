@@ -1277,7 +1277,7 @@ impl PickerDelegate for RecentProjectsDelegate {
                     )
                     .into_any_element();
 
-                let icon = icon_for_remote_connection(folder.connection_options.as_ref());
+                let icon = icon_for_remote_connection(folder.connection_options.as_ref(), cx);
                 let show_icon = self.filtered_entries_include_remote_project();
 
                 let tooltip_path: SharedString = path.to_string_lossy().to_string().into();
@@ -1359,7 +1359,7 @@ impl PickerDelegate for RecentProjectsDelegate {
                     .map(|p| p.compact().to_string_lossy().to_string())
                     .collect();
                 let tooltip_path: SharedString = ordered_paths.join("\n").into();
-                let icon = icon_for_project_group(key);
+                let icon = icon_for_project_group(key, cx);
                 let show_icon = self.filtered_entries_include_remote_project();
 
                 let mut path_start_offset = 0;
@@ -1620,10 +1620,13 @@ impl PickerDelegate for RecentProjectsDelegate {
                     )
                     .into_any_element();
 
-                let icon = icon_for_remote_connection(match location {
-                    SerializedWorkspaceLocation::Local => None,
-                    SerializedWorkspaceLocation::Remote(options) => Some(options),
-                });
+                let icon = icon_for_remote_connection(
+                    match location {
+                        SerializedWorkspaceLocation::Local => None,
+                        SerializedWorkspaceLocation::Remote(options) => Some(options),
+                    },
+                    cx,
+                );
                 let show_icon = self.filtered_entries_include_remote_project();
 
                 Some(
@@ -1989,16 +1992,27 @@ impl PickerDelegate for RecentProjectsDelegate {
     }
 }
 
-fn icon_for_project_group(key: &ProjectGroupKey) -> IconName {
+fn icon_for_project_group(key: &ProjectGroupKey, cx: &App) -> IconName {
     let host = key.host();
-    icon_for_remote_connection(host.as_ref())
+    icon_for_remote_connection(host.as_ref(), cx)
 }
 
-pub(crate) fn icon_for_remote_connection(options: Option<&RemoteConnectionOptions>) -> IconName {
+pub fn icon_for_remote_connection(
+    options: Option<&RemoteConnectionOptions>,
+    cx: &App,
+) -> IconName {
     match options {
         None => IconName::Screen,
         Some(options) => match options {
-            RemoteConnectionOptions::Ssh(_) => IconName::Server,
+            RemoteConnectionOptions::Ssh(_) => {
+                if RemoteSettings::get_global(cx).agent_route_for(options)
+                    == Some(settings::RemoteAgentRoute::Tunneled)
+                {
+                    IconName::ArrowRightLeft
+                } else {
+                    IconName::Server
+                }
+            }
             RemoteConnectionOptions::Wsl(_) => IconName::Linux,
             RemoteConnectionOptions::Docker(_) => IconName::Box,
             #[cfg(any(test, feature = "test-support"))]
@@ -2698,14 +2712,58 @@ mod tests {
         assert!(!delegate.entry_is_remote_project(&delegate.filtered_entries[0]));
         assert!(delegate.entry_is_remote_project(&delegate.filtered_entries[1]));
         assert!(delegate.filtered_entries_include_remote_project());
-        assert_eq!(
-            icon_for_project_group(&delegate.window_project_groups[0]),
-            IconName::Screen
-        );
-        assert_eq!(
-            icon_for_project_group(&delegate.window_project_groups[1]),
-            IconName::Server
-        );
+        cx.update(|cx| {
+            assert_eq!(
+                icon_for_project_group(&delegate.window_project_groups[0], cx),
+                IconName::Screen
+            );
+            assert_eq!(
+                icon_for_project_group(&delegate.window_project_groups[1], cx),
+                IconName::Server
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn tunneled_ssh_connections_use_the_tunneled_icon(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.remote.ssh_connections = Some(vec![
+                        settings::SshConnection {
+                            host: "tunneled-host".into(),
+                            agent_route: Some(settings::RemoteAgentRoute::Tunneled),
+                            ..Default::default()
+                        },
+                        settings::SshConnection {
+                            host: "direct-host".into(),
+                            ..Default::default()
+                        },
+                    ]);
+                });
+            });
+
+            let ssh_options = |host: &str| {
+                RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+                    host: host.to_string().into(),
+                    ..Default::default()
+                })
+            };
+            assert_eq!(
+                icon_for_remote_connection(Some(&ssh_options("tunneled-host")), cx),
+                IconName::ArrowRightLeft
+            );
+            assert_eq!(
+                icon_for_remote_connection(Some(&ssh_options("direct-host")), cx),
+                IconName::Server
+            );
+            assert_eq!(
+                icon_for_remote_connection(Some(&ssh_options("unknown-host")), cx),
+                IconName::Server
+            );
+        });
     }
 
     #[gpui::test]
