@@ -72,6 +72,42 @@ pub fn remote_server_dir_relative() -> &'static RelPath {
     *CACHED
 }
 
+pub fn local_build_remote_server_id() -> std::io::Result<Option<String>> {
+    let marker = std::env::current_exe()?.with_file_name("zed-remote-server-local-build");
+    if !marker.exists() {
+        return Ok(None);
+    }
+
+    let id = std::fs::read_to_string(marker)?;
+    let id = id.trim();
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid local remote server build ID",
+        ));
+    }
+    Ok(Some(id.to_owned()))
+}
+
+pub fn local_build_remote_server_archive(os: &str, arch: &str) -> std::io::Result<Option<PathBuf>> {
+    if local_build_remote_server_id()?.is_none() {
+        return Ok(None);
+    }
+
+    let archive =
+        std::env::current_exe()?.with_file_name(format!("zed-remote-server-{os}-{arch}.gz"));
+    if !archive.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "this local build has no remote server for {os}-{arch}; place a matching archive at {}",
+                archive.display()
+            ),
+        ));
+    }
+    Ok(Some(archive))
+}
+
 // Remove this once 223 goes stable
 /// Returns the relative path to the zed_wsl_server directory on the wsl host.
 pub fn remote_wsl_server_dir_relative() -> &'static RelPath {

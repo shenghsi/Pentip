@@ -14,6 +14,24 @@ pub const LINUX_LARGE_RAM: Runner = Runner("namespace-profile-8x32-ubuntu-2404")
 pub const MAC_DEFAULT: Runner = Runner("namespace-profile-mac-large");
 pub const WINDOWS_DEFAULT: Runner = Runner("self-32vcpu-windows-2022");
 
+// Every runner above is either a paid Namespace.so cloud profile or a
+// self-hosted box - both zed-industries-only infrastructure that a fork
+// doesn't have. These are GitHub's standard hosted runners, used instead for
+// release jobs on forks so they actually get scheduled.
+pub const GITHUB_LINUX: Runner = Runner("ubuntu-latest");
+// GITHUB_MAC is already arm64 natively (macos-latest = Apple Silicon), and
+// cross-compiling x86_64 from it works fine via macOS's toolchain - no
+// separate x86_64 Mac runner needed. Linux aarch64 has no such easy cross
+// story, so it gets a real native ARM64 runner instead.
+pub const GITHUB_LINUX_ARM: Runner = Runner("ubuntu-24.04-arm");
+pub const GITHUB_MAC: Runner = Runner("macos-latest");
+pub const GITHUB_WINDOWS: Runner = Runner("windows-latest");
+// Same reasoning as GITHUB_LINUX_ARM: MSVC can cross-compile aarch64 from an
+// x86_64 host, but this fork's sibling "flint" fork (same codebase, already
+// running this pipeline successfully) builds it natively instead - use a
+// real ARM64 Windows runner for the bundle job specifically.
+pub const GITHUB_WINDOWS_ARM: Runner = Runner("windows-11-arm");
+
 pub struct Runner(&'static str);
 
 impl Into<gh_workflow::RunsOn> for Runner {

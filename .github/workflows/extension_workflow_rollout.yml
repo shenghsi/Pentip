@@ -85,10 +85,10 @@ jobs:
       env:
         FILTER_REPOS: ${{ inputs.filter-repos }}
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
         path: ~/.rustup
+        key: ${{ runner.os }}-${{ runner.arch }}-rustup
     - name: extension_workflow_rollout::fetch_extension_repos::generate_workflow_files
       run: |
         cargo xtask workflows "$COMMIT_SHA"

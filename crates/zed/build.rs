@@ -26,6 +26,10 @@ fn main() {
     if cfg!(target_os = "macos") {
         println!("cargo:rustc-env=MACOSX_DEPLOYMENT_TARGET=10.15.7");
 
+        // Zed's unwind data exceeds ld64's compact-unwind offset limit, so use
+        // the DWARF unwind data directly instead of making the linker fall back.
+        println!("cargo:rustc-link-arg=-Wl,-no_compact_unwind");
+
         // Weakly link ReplayKit to ensure Zed can be used on macOS 10.15+.
         println!("cargo:rustc-link-arg=-Wl,-weak_framework,ReplayKit");
 
