@@ -1,6 +1,6 @@
 use crate::{
-    ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar,
-    sidebar_side_context_menu,
+    AgenticMode, ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar,
+    dock::PanelButtons, sidebar_side_context_menu,
 };
 use gpui::{
     Anchor, AnyView, App, Context, Decorations, Entity, FocusHandle, Focusable, IntoElement,
@@ -76,6 +76,7 @@ struct SidebarStatus {
     side: SidebarSide,
     has_notifications: bool,
     show_toggle: bool,
+    agent_mode: bool,
 }
 
 impl SidebarStatus {
@@ -91,6 +92,7 @@ impl SidebarStatus {
                     side: mw.sidebar_side(cx),
                     has_notifications: mw.sidebar_has_notifications(cx),
                     show_toggle: enabled,
+                    agent_mode: mw.is_agentic_layout(cx) && mw.agentic_mode() == AgenticMode::Agent,
                 }
             })
             .unwrap_or_default()
@@ -104,6 +106,7 @@ pub struct StatusBar {
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
     focus_handle: FocusHandle,
     _observe_active_pane: Subscription,
+    _observe_multi_workspace: Option<Subscription>,
 }
 
 impl Focusable for StatusBar {
@@ -200,9 +203,17 @@ impl StatusBar {
                 sidebar.show_toggle && !sidebar.open && sidebar.side == SidebarSide::Left,
                 |this| this.child(self.render_sidebar_toggle(sidebar, cx)),
             )
-            .children(self.left_items.iter().enumerate().map(|(index, item)| {
-                render_hideable_item("status-bar-left", index, item.as_ref(), cx)
-            }))
+            .children(
+                self.left_items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| {
+                        !sidebar.agent_mode || item.item_type() == TypeId::of::<PanelButtons>()
+                    })
+                    .map(|(index, item)| {
+                        render_hideable_item("status-bar-left", index, item.as_ref(), cx)
+                    }),
+            )
     }
 
     fn render_right_tools(
@@ -219,6 +230,9 @@ impl StatusBar {
                     .iter()
                     .enumerate()
                     .rev()
+                    .filter(|(_, item)| {
+                        !sidebar.agent_mode || item.item_type() == TypeId::of::<PanelButtons>()
+                    })
                     .map(|(index, item)| {
                         render_hideable_item("status-bar-right", index, item.as_ref(), cx)
                     }),
@@ -330,6 +344,10 @@ impl StatusBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let observe_multi_workspace = multi_workspace
+            .as_ref()
+            .and_then(|multi_workspace| multi_workspace.upgrade())
+            .map(|multi_workspace| cx.observe(&multi_workspace, |_, _, cx| cx.notify()));
         let mut this = Self {
             left_items: Default::default(),
             right_items: Default::default(),
@@ -339,6 +357,7 @@ impl StatusBar {
             _observe_active_pane: cx.observe_in(active_pane, window, |this, _, window, cx| {
                 this.update_active_pane_item(window, cx)
             }),
+            _observe_multi_workspace: observe_multi_workspace,
         };
         this.update_active_pane_item(window, cx);
         this
@@ -349,6 +368,9 @@ impl StatusBar {
         multi_workspace: WeakEntity<MultiWorkspace>,
         cx: &mut Context<Self>,
     ) {
+        self._observe_multi_workspace = multi_workspace
+            .upgrade()
+            .map(|multi_workspace| cx.observe(&multi_workspace, |_, _, cx| cx.notify()));
         self.multi_workspace = Some(multi_workspace);
         cx.notify();
     }
