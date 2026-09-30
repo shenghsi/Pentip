@@ -32172,6 +32172,7 @@ async fn test_find_enclosing_node_with_task(cx: &mut TestAppContext) {
             cx,
         )
     });
+    cx.executor().run_until_parked();
 
     editor.update_in(cx, |editor, window, cx| {
         let snapshot = editor.buffer().read(cx).snapshot(cx);
