@@ -34,6 +34,9 @@ pub(crate) struct ThreadSwitcherThreadEntry {
 #[derive(Clone)]
 pub(crate) struct ThreadSwitcherTerminalEntry {
     pub metadata: TerminalThreadMetadata,
+    pub icon: IconName,
+    pub icon_color: Option<Color>,
+    pub status: AgentThreadStatus,
     pub(super) workspace: ThreadEntryWorkspace,
     pub project_name: Option<SharedString>,
     pub worktrees: Vec<ThreadItemWorktreeInfo>,
@@ -97,7 +100,7 @@ impl ThreadSwitcherEntry {
         match self {
             Self::Thread(entry) if entry.is_draft => IconName::Circle,
             Self::Thread(entry) => entry.icon,
-            Self::Terminal(_) => IconName::Terminal,
+            Self::Terminal(entry) => entry.icon,
         }
     }
 
@@ -109,10 +112,17 @@ impl ThreadSwitcherEntry {
         }
     }
 
+    fn icon_color(&self) -> Option<Color> {
+        match self {
+            Self::Thread(_) => None,
+            Self::Terminal(entry) => entry.icon_color,
+        }
+    }
+
     fn status(&self) -> AgentThreadStatus {
         match self {
             Self::Thread(entry) => entry.status,
-            Self::Terminal(_) => AgentThreadStatus::default(),
+            Self::Terminal(entry) => entry.status,
         }
     }
 
@@ -380,6 +390,7 @@ impl Render for ThreadSwitcher {
                         ThreadItem::new(entry.element_id(), entry.title())
                             .rounded(true)
                             .icon(entry.icon())
+                            .when_some(entry.icon_color(), |this, color| this.icon_color(color))
                             .when(entry.is_draft(), |this| {
                                 this.icon_color(Color::Custom(
                                     cx.theme().colors().icon_muted.opacity(0.2),

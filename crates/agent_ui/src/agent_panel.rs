@@ -39,8 +39,10 @@ use crate::ExpandMessageEditor;
 use crate::ManageProfiles;
 use crate::agent_connection_store::AgentConnectionStore;
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
+use crate::terminal_agent_status::DetectedTerminalAgentStatus;
 use crate::terminal_thread_metadata_store::{
-    TerminalThreadMetadata, TerminalThreadMetadataStore, compose_terminal_thread_title,
+    TerminalAgentStatus, TerminalThreadMetadata, TerminalThreadMetadataStore,
+    claude_thread_display_title, codex_thread_display_title, compose_terminal_thread_title,
     normalize_terminal_custom_title, terminal_title_without_prefix,
 };
 use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore, ThreadMetadataStoreEvent};
@@ -50,6 +52,7 @@ use crate::{
 };
 use crate::{
     AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
+    NewAgyTerminalThread, NewClaudeTerminalThread, NewCodexTerminalThread, NewPiTerminalThread,
     NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, RenameSelectedThread,
     ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata,
     ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
@@ -58,7 +61,7 @@ use crate::{
     },
     ui::{AgentNotification, AgentNotificationEvent, EndTrialUpsell},
 };
-use agent_settings::AgentSettings;
+use agent_settings::{AgentSettings, WindowLayout};
 use ai_onboarding::AgentPanelOnboarding;
 use anyhow::{Context as _, Result, anyhow};
 #[cfg(feature = "audio")]
@@ -95,7 +98,7 @@ use ui::{
     ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding, PopoverMenu,
     PopoverMenuHandle, ProjectEmptyState, Tab, Tooltip, prelude::*, utils::WithRemSize,
 };
-use util::ResultExt as _;
+use util::{ResultExt as _, paths::PathStyle};
 use workspace::{
     CollaboratorId, DraggedSelection, DraggedTab, MultiWorkspace, PathList, SerializedPathList,
     ToggleWorkspaceSidebar, ToggleZoom, ToolbarItemView, Workspace, WorkspaceId,
@@ -109,6 +112,7 @@ const LAST_USED_AGENT_KEY: &str = "agent_panel__last_used_external_agent";
 const LAST_CREATED_ENTRY_KIND_KEY: &str = "agent_panel__last_created_entry_kind";
 const TERMINAL_AGENT_TELEMETRY_ID: &str = "terminal";
 const TERMINAL_INIT_COMMAND_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+const TERMINAL_AGENT_STATUS_DEBOUNCE: Duration = Duration::from_millis(300);
 const KNOWN_TERMINAL_AGENT_COMMANDS: &[&str] = &[
     "agent", // Unfortunately, both Cursor cli + grok
     "agy",
@@ -133,20 +137,48 @@ fn is_known_terminal_agent_command(command: &str) -> bool {
     KNOWN_TERMINAL_AGENT_COMMANDS.contains(&command)
 }
 
-fn terminal_program_to_report(
+fn terminal_program_update(
     last_observed_program: &mut Option<String>,
     current_program: Option<String>,
-) -> Option<String> {
+) -> (Option<String>, bool) {
     let current_program =
         current_program.filter(|program| is_known_terminal_agent_command(program));
-    let program_to_report =
-        if current_program.is_some() && current_program != *last_observed_program {
-            current_program.clone()
-        } else {
-            None
-        };
+    let changed = current_program != *last_observed_program;
+    let program_to_report = changed.then(|| current_program.clone()).flatten();
     *last_observed_program = current_program;
-    program_to_report
+    (program_to_report, changed)
+}
+
+fn codex_session_prefix(title: &str) -> Option<String> {
+    title.split_whitespace().find_map(|word| {
+        let prefix = word
+            .strip_suffix("...")
+            .or_else(|| word.strip_suffix('…'))
+            .or_else(|| uuid::Uuid::parse_str(word).ok().map(|_| word))?;
+        (prefix.len() >= 20
+            && prefix
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() || character == '-'))
+        .then(|| prefix.to_string())
+    })
+}
+
+/// Scans for agy's own "Resume with -c (or command below): agy
+/// --conversation=<id>" hint, which it prints to the terminal's normal
+/// scrollback when an interactive session ends. Verified against the real
+/// CLI (agy 1.2.7): this is the only way to learn a fresh agy conversation's
+/// id, since -- unlike Claude/Pi -- `agy --conversation <id>` can't be used
+/// to assign an id at start; an id that doesn't already exist silently gets
+/// a different, agy-chosen conversation instead. `rsplit_once` picks the
+/// most recent hint if more than one is still in the scrollback window.
+fn agy_conversation_id_from_screen(screen_tail: &str) -> Option<String> {
+    let (_, after) = screen_tail.rsplit_once("--conversation")?;
+    let after = after
+        .strip_prefix('=')
+        .or_else(|| after.strip_prefix(' '))?;
+    let token = after.split_whitespace().next()?;
+    uuid::Uuid::parse_str(token).ok()?;
+    Some(token.to_string())
 }
 
 /// Maximum number of idle threads kept in the agent panel's retained list.
@@ -166,6 +198,10 @@ pub struct TerminalId(uuid::Uuid);
 impl TerminalId {
     pub(crate) fn new() -> Self {
         Self(uuid::Uuid::new_v4())
+    }
+
+    pub fn from_session_id(session_id: uuid::Uuid) -> Self {
+        Self(session_id)
     }
 
     pub(crate) fn to_key_string(self) -> String {
@@ -385,6 +421,58 @@ pub fn init(cx: &mut App) {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         panel.update(cx, |panel, cx| {
                             panel.new_terminal(
+                                Some(workspace),
+                                AgentThreadSource::AgentPanel,
+                                window,
+                                cx,
+                            )
+                        });
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    }
+                })
+                .register_action(|workspace, _: &NewCodexTerminalThread, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            panel.new_codex_terminal(
+                                Some(workspace),
+                                AgentThreadSource::AgentPanel,
+                                window,
+                                cx,
+                            )
+                        });
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    }
+                })
+                .register_action(|workspace, _: &NewClaudeTerminalThread, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            panel.new_claude_terminal(
+                                Some(workspace),
+                                AgentThreadSource::AgentPanel,
+                                window,
+                                cx,
+                            )
+                        });
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    }
+                })
+                .register_action(|workspace, _: &NewPiTerminalThread, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            panel.new_pi_terminal(
+                                Some(workspace),
+                                AgentThreadSource::AgentPanel,
+                                window,
+                                cx,
+                            )
+                        });
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    }
+                })
+                .register_action(|workspace, _: &NewAgyTerminalThread, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            panel.new_agy_terminal(
                                 Some(workspace),
                                 AgentThreadSource::AgentPanel,
                                 window,
@@ -999,6 +1087,10 @@ struct AgentTerminal {
     last_known_terminal_title: String,
     last_observed_program: Option<String>,
     working_directory: Option<PathBuf>,
+    agent_cli: Option<String>,
+    agent_cli_session_prefix: Option<String>,
+    pending_status_classification: Option<Task<()>>,
+    pending_graceful_close: Option<Task<()>>,
     created_at: DateTime<Utc>,
     has_notification: bool,
     search_bar: Option<Entity<BufferSearchBar>>,
@@ -1039,10 +1131,24 @@ impl AgentTerminal {
     fn title(&self, cx: &App) -> SharedString {
         let terminal_title = self.terminal_title(cx);
         let custom_title = self.custom_title(cx);
-        compose_terminal_thread_title(
+        let title = compose_terminal_thread_title(
             terminal_title.as_ref(),
             custom_title.as_ref().map(|title| title.as_ref()),
-        )
+        );
+        if custom_title.is_some() {
+            return title;
+        }
+        match self.agent_cli.as_deref() {
+            Some("codex") => {
+                if let Some(session_prefix) = self.agent_cli_session_prefix.as_deref() {
+                    codex_thread_display_title(title.as_ref(), session_prefix)
+                } else {
+                    title
+                }
+            }
+            Some("claude") => claude_thread_display_title(title.as_ref()),
+            _ => title,
+        }
     }
 
     fn editable_title(&self, cx: &App) -> SharedString {
@@ -1070,6 +1176,38 @@ impl AgentTerminal {
 
     fn refresh_metadata(&mut self, cx: &mut App) -> bool {
         let title_changed = self.refresh_title(cx);
+        let session_prefix_changed = match self.agent_cli.as_deref() {
+            None | Some("codex") => {
+                let terminal_title = self.current_terminal_title(cx);
+                if let Some(prefix) = codex_session_prefix(terminal_title.as_ref())
+                    && self.agent_cli_session_prefix.as_ref() != Some(&prefix)
+                {
+                    self.agent_cli = Some("codex".to_string());
+                    self.agent_cli_session_prefix = Some(prefix);
+                    true
+                } else {
+                    false
+                }
+            }
+            Some("agy") => {
+                let screen_tail = self
+                    .view
+                    .read(cx)
+                    .terminal()
+                    .read(cx)
+                    .last_n_non_empty_lines(60)
+                    .join("\n");
+                if let Some(conversation_id) = agy_conversation_id_from_screen(&screen_tail)
+                    && self.agent_cli_session_prefix.as_deref() != Some(conversation_id.as_str())
+                {
+                    self.agent_cli_session_prefix = Some(conversation_id);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
         let current_working_directory = self.view.read(cx).terminal().read(cx).working_directory();
         let working_directory_changed = current_working_directory
             .as_ref()
@@ -1077,7 +1215,7 @@ impl AgentTerminal {
         if working_directory_changed {
             self.working_directory = current_working_directory;
         }
-        title_changed || working_directory_changed
+        title_changed || working_directory_changed || session_prefix_changed
     }
 
     fn custom_title(&self, cx: &App) -> Option<SharedString> {
@@ -1089,7 +1227,7 @@ impl AgentTerminal {
         terminal_id: TerminalId,
         source: AgentThreadSource,
         cx: &App,
-    ) {
+    ) -> Option<Option<String>> {
         let current_program = self
             .view
             .read(cx)
@@ -1097,9 +1235,9 @@ impl AgentTerminal {
             .read(cx)
             .foreground_process_command_name();
 
-        if let Some(program) =
-            terminal_program_to_report(&mut self.last_observed_program, current_program)
-        {
+        let (program_to_report, changed) =
+            terminal_program_update(&mut self.last_observed_program, current_program);
+        if let Some(program) = program_to_report {
             telemetry::event!(
                 "Agent Terminal Program Started",
                 agent = TERMINAL_AGENT_TELEMETRY_ID,
@@ -1110,6 +1248,7 @@ impl AgentTerminal {
                 thread_location = "current_worktree",
             );
         }
+        changed.then(|| self.last_observed_program.clone())
     }
 }
 
@@ -1613,6 +1752,11 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
+        if matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_)) {
+            window.dispatch_action(workspace::ToggleAgentMode.boxed_clone(), cx);
+            return;
+        }
+
         if workspace
             .panel::<Self>(cx)
             .is_some_and(|panel| panel.read(cx).enabled(cx))
@@ -1751,6 +1895,10 @@ impl AgentPanel {
 
     pub fn is_visible(workspace: &Entity<Workspace>, cx: &App) -> bool {
         let workspace_read = workspace.read(cx);
+
+        if workspace_read.is_agentic_agent_mode(cx) {
+            return workspace_read.panel::<AgentPanel>(cx).is_some();
+        }
 
         workspace_read
             .panel::<AgentPanel>(cx)
@@ -2015,10 +2163,153 @@ impl AgentPanel {
             true,
             true,
             true,
+            None,
+            None,
+            None,
             source,
             window,
             cx,
         );
+    }
+
+    pub fn new_codex_terminal(
+        &mut self,
+        workspace: Option<&Workspace>,
+        source: AgentThreadSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.supports_terminal(cx) {
+            return;
+        }
+        self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Terminal, cx);
+        let working_directory = self.terminal_working_directory(workspace, cx);
+        self.spawn_agent_cli_terminal(working_directory, "Codex", "codex", source, window, cx);
+    }
+
+    pub fn new_claude_terminal(
+        &mut self,
+        workspace: Option<&Workspace>,
+        source: AgentThreadSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.supports_terminal(cx) {
+            return;
+        }
+        self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Terminal, cx);
+        let working_directory = self.terminal_working_directory(workspace, cx);
+        self.spawn_agent_cli_terminal(working_directory, "Claude", "claude", source, window, cx);
+    }
+
+    pub fn new_pi_terminal(
+        &mut self,
+        workspace: Option<&Workspace>,
+        source: AgentThreadSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.supports_terminal(cx) {
+            return;
+        }
+        self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Terminal, cx);
+        let working_directory = self.terminal_working_directory(workspace, cx);
+        self.spawn_agent_cli_terminal(working_directory, "Pi", "pi", source, window, cx);
+    }
+
+    pub fn new_agy_terminal(
+        &mut self,
+        workspace: Option<&Workspace>,
+        source: AgentThreadSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.supports_terminal(cx) {
+            return;
+        }
+        self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Terminal, cx);
+        let working_directory = self.terminal_working_directory(workspace, cx);
+        self.spawn_agent_cli_terminal(working_directory, "Antigravity", "agy", source, window, cx);
+    }
+
+    #[cfg(not(test))]
+    fn spawn_agent_cli_terminal(
+        &mut self,
+        working_directory: Option<PathBuf>,
+        title: &'static str,
+        command: &'static str,
+        source: AgentThreadSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let terminal_id = TerminalId::new();
+        let startup_command = Self::agent_cli_start_command(command, Some(terminal_id));
+        let session_id = matches!(command, "claude" | "pi").then(|| terminal_id.to_key_string());
+        self.spawn_terminal(
+            terminal_id,
+            working_directory,
+            (command != "codex" && command != "claude").then(|| SharedString::from(title)),
+            Some(SharedString::from(title)),
+            None,
+            true,
+            true,
+            true,
+            Some(startup_command),
+            Some(command.to_string()),
+            session_id,
+            source,
+            window,
+            cx,
+        );
+    }
+
+    #[cfg(test)]
+    fn spawn_agent_cli_terminal(
+        &mut self,
+        working_directory: Option<PathBuf>,
+        title: &'static str,
+        command: &'static str,
+        source: AgentThreadSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let terminal_id = TerminalId::new();
+        let session_id = matches!(command, "claude" | "pi").then(|| terminal_id.to_key_string());
+        let startup_commands = Self::terminal_startup_commands(
+            true,
+            Some(Self::agent_cli_start_command(command, Some(terminal_id))),
+            cx,
+        );
+        if let Err(error) = self.insert_display_only_terminal(
+            terminal_id,
+            working_directory,
+            (command != "codex" && command != "claude").then(|| SharedString::from(title)),
+            Some(SharedString::from(title)),
+            None,
+            true,
+            true,
+            false,
+            Some(command.to_string()),
+            source,
+            window,
+            cx,
+        ) {
+            log::error!("failed to spawn test agent CLI terminal: {error:#}");
+            return;
+        }
+        if let Some(terminal) = self
+            .terminals
+            .get(&terminal_id)
+            .map(|terminal| terminal.view.read(cx).terminal().clone())
+        {
+            Self::write_terminal_startup_commands(&terminal, startup_commands, cx);
+        }
+        if let Some(session_id) = session_id
+            && let Some(terminal) = self.terminals.get_mut(&terminal_id)
+        {
+            terminal.agent_cli_session_prefix = Some(session_id);
+            self.persist_terminal_metadata(terminal_id, cx);
+        }
     }
 
     fn terminal_working_directory(
@@ -2069,12 +2360,16 @@ impl AgentPanel {
         select: bool,
         focus: bool,
         run_init_command: bool,
+        startup_command: Option<String>,
+        agent_cli: Option<String>,
+        saved_session_prefix: Option<String>,
         source: AgentThreadSource,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let terminal_working_directory = working_directory.clone();
-        let init_command = Self::terminal_init_command(run_init_command, cx);
+        let startup_commands =
+            Self::terminal_startup_commands(run_init_command, startup_command, cx);
         let terminal_task = self.project.update(cx, |project, cx| {
             project.create_terminal_shell(working_directory, cx)
         });
@@ -2101,6 +2396,19 @@ impl AgentPanel {
                 }
             };
             this.update_in(cx, |this, window, cx| {
+                let mut startup_commands = startup_commands;
+                if agent_cli.is_none()
+                    && let Some(command) = Self::terminal_agent_session_command(
+                        terminal.read(cx).shell_kind(),
+                        terminal_id,
+                    )
+                {
+                    startup_commands.insert(0, command);
+                    startup_commands.insert(
+                        1,
+                        Self::terminal_clear_command(terminal.read(cx).shell_kind()),
+                    );
+                }
                 let terminal_for_init_command = terminal.clone();
                 let terminal_view = cx.new(|cx| {
                     let mut view =
@@ -2117,11 +2425,22 @@ impl AgentPanel {
                     created_at,
                     select,
                     focus,
+                    agent_cli,
                     source,
                     window,
                     cx,
                 );
-                Self::write_terminal_init_command(&terminal_for_init_command, init_command, cx);
+                if let Some(prefix) = saved_session_prefix {
+                    if let Some(terminal) = this.terminals.get_mut(&terminal_id) {
+                        terminal.agent_cli_session_prefix = Some(prefix);
+                    }
+                    this.persist_terminal_metadata(terminal_id, cx);
+                }
+                Self::write_terminal_startup_commands(
+                    &terminal_for_init_command,
+                    startup_commands,
+                    cx,
+                );
             })?;
             anyhow::Ok(())
         })
@@ -2135,19 +2454,115 @@ impl AgentPanel {
             .filter(|command| !command.trim().is_empty())
     }
 
-    fn write_terminal_init_command(
+    fn terminal_startup_commands(
+        run_init_command: bool,
+        startup_command: Option<String>,
+        cx: &App,
+    ) -> Vec<String> {
+        Self::terminal_init_command(run_init_command, cx)
+            .into_iter()
+            .chain(startup_command)
+            .collect()
+    }
+
+    fn terminal_agent_session_command(
+        shell_kind: task::ShellKind,
+        terminal_id: TerminalId,
+    ) -> Option<String> {
+        let session_id = terminal_id.to_key_string();
+        match shell_kind {
+            task::ShellKind::Posix => Some(format!(
+                "codex() {{ command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' \"$@\"; }}; claude() {{ case \" $* \" in *\" --resume \"*|*\" --resume=\"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*|*\" --session-id \"*|*\" --session-id=\"*) command claude \"$@\";; *) command claude --session-id {session_id} \"$@\";; esac; }}; pi() {{ case \"$1\" in install|remove|uninstall|update|list|config|auth) command pi \"$@\";; *) case \" $* \" in *\" --resume \"*|*\" --resume=\"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*|*\" --session \"*|*\" --session=\"*|*\" --session-id \"*|*\" --session-id=\"*) command pi \"$@\";; *) command pi --session-id {session_id} \"$@\";; esac;; esac; }}"
+            )),
+            task::ShellKind::Fish => Some(format!(
+                "function codex; command codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' $argv; end; function claude; if contains -- --resume $argv; or contains -- -r $argv; or contains -- --continue $argv; or contains -- -c $argv; or contains -- --session-id $argv; command claude $argv; else; command claude --session-id {session_id} $argv; end; end; function pi; switch \"$argv[1]\"; case install remove uninstall update list config auth; command pi $argv; case '*'; if contains -- --resume $argv; or contains -- -r $argv; or contains -- --continue $argv; or contains -- -c $argv; or contains -- --session $argv; or contains -- --session-id $argv; command pi $argv; else; command pi --session-id {session_id} $argv; end; end; end"
+            )),
+            task::ShellKind::PowerShell | task::ShellKind::Pwsh => Some(format!(
+                "function codex {{ & (Get-Command codex -CommandType Application -ErrorAction Stop) -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' @args }}; function claude {{ $claudeArgs = $args; $hasSessionArgument = $claudeArgs | Where-Object {{ $_ -in @('--resume', '-r', '--continue', '-c', '--session-id') -or $_ -like '--resume=*' -or $_ -like '--session-id=*' }}; if ($hasSessionArgument) {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) @claudeArgs }} else {{ & (Get-Command claude -CommandType Application -ErrorAction Stop) --session-id {session_id} @claudeArgs }} }}; function pi {{ $piArgs = $args; if ($piArgs[0] -in @('install','remove','uninstall','update','list','config','auth')) {{ & (Get-Command pi -CommandType Application -ErrorAction Stop) @piArgs }} else {{ $hasSessionArgument = $piArgs | Where-Object {{ $_ -in @('--resume', '-r', '--continue', '-c', '--session', '--session-id') -or $_ -like '--resume=*' -or $_ -like '--session=*' -or $_ -like '--session-id=*' }}; if ($hasSessionArgument) {{ & (Get-Command pi -CommandType Application -ErrorAction Stop) @piArgs }} else {{ & (Get-Command pi -CommandType Application -ErrorAction Stop) --session-id {session_id} @piArgs }} }} }}"
+            )),
+            _ => None,
+        }
+    }
+
+    fn terminal_clear_command(shell_kind: task::ShellKind) -> String {
+        match shell_kind {
+            task::ShellKind::PowerShell | task::ShellKind::Pwsh => "Clear-Host".to_string(),
+            _ => "clear".to_string(),
+        }
+    }
+
+    fn agent_cli_start_command(command: &str, terminal_id: Option<TerminalId>) -> String {
+        match command {
+            "codex" => "codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]'"
+                .to_string(),
+            "claude" => terminal_id.map_or_else(
+                || "claude".to_string(),
+                |terminal_id| format!("claude --session-id {}", terminal_id.to_key_string()),
+            ),
+            "pi" => terminal_id.map_or_else(
+                || "pi".to_string(),
+                |terminal_id| format!("pi --session-id {}", terminal_id.to_key_string()),
+            ),
+            _ => command.to_string(),
+        }
+    }
+
+    fn agent_cli_resume_command(
+        agent_cli: &str,
+        session_prefix: &str,
+        path_style: PathStyle,
+    ) -> Option<String> {
+        if agent_cli == "claude" {
+            let session_id = uuid::Uuid::parse_str(session_prefix).ok()?;
+            return Some(format!("claude --resume {session_id}"));
+        }
+        if agent_cli == "pi" {
+            let session_id = uuid::Uuid::parse_str(session_prefix).ok()?;
+            return Some(format!("pi --session {session_id}"));
+        }
+        if agent_cli == "agy" {
+            let session_id = uuid::Uuid::parse_str(session_prefix).ok()?;
+            return Some(format!("agy --conversation {session_id}"));
+        }
+        if agent_cli != "codex" || codex_session_prefix(&format!("{session_prefix}...")).is_none() {
+            return None;
+        }
+
+        if let Ok(session_id) = uuid::Uuid::parse_str(session_prefix) {
+            return Some(format!(
+                "codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' resume {session_id}"
+            ));
+        }
+
+        if path_style.is_windows() {
+            Some(format!(
+                "$codexHome = if ($env:CODEX_HOME) {{ $env:CODEX_HOME }} else {{ Join-Path $HOME '.codex' }}; \
+                 $sessionFile = Get-ChildItem (Join-Path $codexHome 'sessions') -Recurse -Filter '*{session_prefix}*.jsonl' -ErrorAction SilentlyContinue | Select-Object -First 1; \
+                 $sessionId = if ($sessionFile -and $sessionFile.BaseName -match '([0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}})$') {{ $Matches[1] }} else {{ $stateDb = Get-ChildItem $codexHome -Filter 'state_*.sqlite' | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($stateDb) {{ sqlite3 $stateDb.FullName \"SELECT id FROM threads WHERE id LIKE '{session_prefix}%' LIMIT 1\" }} }}; \
+                 if ($sessionId) {{ codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' resume $sessionId }} else {{ Write-Error 'Pentip could not find the saved Codex session' }}"
+            ))
+        } else {
+            Some(format!(
+                "codex_home=${{CODEX_HOME:-$HOME/.codex}}; session_file=$(find \"$codex_home/sessions\" -type f -name '*{session_prefix}*.jsonl' -print -quit 2>/dev/null); \
+                 session_id=$(basename \"$session_file\" .jsonl | sed -E 's/^.*-([0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}})$/\\1/'); \
+                 if [ -z \"$session_id\" ]; then state_db=$(ls -t \"$codex_home\"/state_*.sqlite 2>/dev/null | head -n 1); session_id=$(sqlite3 \"$state_db\" \"SELECT id FROM threads WHERE id LIKE '{session_prefix}%' LIMIT 1\" 2>/dev/null); fi; \
+                 if [ -n \"$session_id\" ]; then codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' resume \"$session_id\"; else printf '%s\\n' 'Pentip could not find the saved Codex session'; fi"
+            ))
+        }
+    }
+
+    fn write_terminal_startup_commands(
         terminal: &Entity<terminal::Terminal>,
-        init_command: Option<String>,
+        commands: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(command) = init_command else {
+        let input = Self::terminal_startup_input(commands);
+        if input.is_empty() {
             return;
-        };
+        }
 
         if !terminal.read(cx).is_pty() {
-            terminal.update(cx, |terminal, _| {
-                terminal.write_init_command(Self::terminal_init_command_input(command))
-            });
+            terminal.update(cx, |terminal, _| terminal.write_init_command(input));
             return;
         }
 
@@ -2167,7 +2582,6 @@ impl AgentPanel {
                 _ = timeout.fuse() => {}
             }
 
-            let input = Self::terminal_init_command_input(command);
             if let Err(error) = terminal.update(cx, move |terminal, cx| {
                 if !terminal.write_init_command_after_startup(input, cx) {
                     log::debug!(
@@ -2182,12 +2596,15 @@ impl AgentPanel {
         .detach_and_log_err(cx);
     }
 
-    fn terminal_init_command_input(command: String) -> Vec<u8> {
-        let mut input = command.into_bytes();
-        // CR, not "\r\n": "\r\n" puts PowerShell into continuation
-        // mode (same convention as the activation-script writes in
-        // `TerminalBuilder::new`).
-        input.push(b'\x0d');
+    fn terminal_startup_input(commands: Vec<String>) -> Vec<u8> {
+        let mut input = Vec::new();
+        for command in commands {
+            input.extend(command.into_bytes());
+            // CR, not "\r\n": "\r\n" puts PowerShell into continuation
+            // mode (same convention as the activation-script writes in
+            // `TerminalBuilder::new`).
+            input.push(b'\x0d');
+        }
         input
     }
 
@@ -2201,6 +2618,7 @@ impl AgentPanel {
         created_at: Option<DateTime<Utc>>,
         select: bool,
         focus: bool,
+        agent_cli: Option<String>,
         source: AgentThreadSource,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2231,8 +2649,12 @@ impl AgentPanel {
                 | TerminalEvent::BreadcrumbsChanged => {
                     this.refresh_terminal_metadata(terminal_id, cx);
                     this.report_terminal_program(terminal_id, source, cx);
+                    this.schedule_terminal_agent_status_classification(terminal_id, cx);
                 }
-                TerminalEvent::Bell => this.mark_terminal_notification(terminal_id, window, cx),
+                TerminalEvent::Bell => {
+                    this.mark_terminal_notification(terminal_id, window, cx);
+                    this.reclassify_terminal_agent_status(terminal_id, true, cx);
+                }
                 TerminalEvent::CloseTerminal => {
                     this.request_close_terminal_from_terminal_event(terminal_id, cx);
                 }
@@ -2255,6 +2677,10 @@ impl AgentPanel {
             last_known_terminal_title,
             last_observed_program: None,
             working_directory,
+            agent_cli,
+            agent_cli_session_prefix: None,
+            pending_status_classification: None,
+            pending_graceful_close: None,
             created_at: created_at.unwrap_or_else(Utc::now),
             has_notification: false,
             search_bar: None,
@@ -2266,8 +2692,8 @@ impl AgentPanel {
             self.pending_terminal_spawn = None;
         }
         terminal.refresh_metadata(cx);
-        terminal.report_started_terminal_program(terminal_id, source, cx);
         self.terminals.insert(terminal_id, terminal);
+        self.report_terminal_program(terminal_id, source, cx);
         self.persist_terminal_metadata(terminal_id, cx);
         self.emit_terminal_thread_started(terminal_id, source, cx);
         if select {
@@ -2293,6 +2719,11 @@ impl AgentPanel {
             self.dismiss_terminal_notifications(terminal_id, cx);
         }
         self.set_base_view(BaseView::Terminal { terminal_id }, focus, window, cx);
+        if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+            store.update(cx, |store, cx| {
+                store.mark_active_agent_status_seen(terminal_id, cx);
+            });
+        }
         if had_notification {
             cx.emit(AgentPanelEvent::EntryChanged);
             cx.notify();
@@ -2317,6 +2748,59 @@ impl AgentPanel {
         self.close_terminal_internal(terminal_id, false, window, cx);
     }
 
+    pub fn begin_graceful_agy_close(
+        &mut self,
+        terminal_id: TerminalId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(terminal) = self.terminals.get(&terminal_id) else {
+            return false;
+        };
+        if terminal.agent_cli.as_deref() != Some("agy")
+            || terminal.agent_cli_session_prefix.is_some()
+        {
+            return false;
+        }
+        if terminal.pending_graceful_close.is_some() {
+            return true;
+        }
+        let terminal_entity = terminal.view.read(cx).terminal().clone();
+        terminal_entity.update(cx, |terminal, _| terminal.input(vec![b'\x03']));
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            terminal_entity
+                .update(cx, |terminal, _| terminal.input(vec![b'\x03']));
+            for _ in 0..30 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let captured = this
+                    .update(cx, |this, cx| {
+                        this.refresh_terminal_metadata(terminal_id, cx);
+                        this.terminals
+                            .get(&terminal_id)
+                            .is_none_or(|terminal| terminal.agent_cli_session_prefix.is_some())
+                    })
+                    .unwrap_or(true);
+                if captured {
+                    break;
+                }
+            }
+            this.update(cx, |this, cx| {
+                if let Some(metadata) = this.terminal_metadata(terminal_id, cx) {
+                    cx.emit(AgentPanelEvent::TerminalGracefulCloseReady { metadata });
+                }
+            })
+            .ok();
+        });
+        if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+            terminal.pending_graceful_close = Some(task);
+        }
+        true
+    }
+
     fn close_terminal_internal(
         &mut self,
         terminal_id: TerminalId,
@@ -2330,9 +2814,11 @@ impl AgentPanel {
             self.pending_terminal_spawn = None;
         }
         self.dismiss_terminal_notifications(terminal_id, cx);
-        if self.terminals.remove(&terminal_id).is_none() {
+        let Some(terminal) = self.terminals.remove(&terminal_id) else {
             return;
-        }
+        };
+        let terminal_entity = terminal.view.read(cx).terminal().clone();
+        terminal_entity.update(cx, |terminal, _| terminal.terminate_processes());
         if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
             store.update(cx, |store, cx| {
                 store.delete(terminal_id, cx);
@@ -2392,9 +2878,108 @@ impl AgentPanel {
         source: AgentThreadSource,
         cx: &mut Context<Self>,
     ) {
-        if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
-            terminal.report_started_terminal_program(terminal_id, source, cx);
+        let program_change = self.terminals.get_mut(&terminal_id).and_then(|terminal| {
+            let active_program =
+                terminal.report_started_terminal_program(terminal_id, source, cx)?;
+            if let Some(program) = active_program.as_ref() {
+                if terminal.agent_cli.as_ref() != Some(program) {
+                    terminal.agent_cli_session_prefix = None;
+                }
+                terminal.agent_cli = Some(program.clone());
+                if (program == "claude" || program == "pi")
+                    && terminal.agent_cli_session_prefix.is_none()
+                {
+                    terminal.agent_cli_session_prefix = Some(terminal_id.to_key_string());
+                }
+            }
+            terminal.refresh_metadata(cx);
+            Some(active_program)
+        });
+        if let Some(active_program) = program_change {
+            if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+                store.update(cx, |store, cx| {
+                    store.set_active_agent_program(terminal_id, active_program.clone(), cx);
+                    store.set_active_agent_status(
+                        terminal_id,
+                        active_program.map(|_| TerminalAgentStatus::Running),
+                        cx,
+                    );
+                });
+            }
+            self.persist_terminal_metadata(terminal_id, cx);
+            cx.notify();
         }
+    }
+
+    fn schedule_terminal_agent_status_classification(
+        &mut self,
+        terminal_id: TerminalId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(terminal) = self.terminals.get_mut(&terminal_id) else {
+            return;
+        };
+        if terminal.agent_cli.is_none() || terminal.pending_status_classification.is_some() {
+            return;
+        }
+        terminal.pending_status_classification = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(TERMINAL_AGENT_STATUS_DEBOUNCE)
+                .await;
+            this.update(cx, |panel, cx| {
+                if let Some(terminal) = panel.terminals.get_mut(&terminal_id) {
+                    terminal.pending_status_classification = None;
+                }
+                panel.reclassify_terminal_agent_status(terminal_id, false, cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn reclassify_terminal_agent_status(
+        &mut self,
+        terminal_id: TerminalId,
+        bell_triggered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(terminal) = self.terminals.get(&terminal_id) else {
+            return;
+        };
+        let Some(agent_cli) = terminal.agent_cli.as_deref() else {
+            return;
+        };
+        let terminal_entity = terminal.view.read(cx).terminal().clone();
+        let terminal = terminal_entity.read(cx);
+        let screen_tail = terminal.last_n_non_empty_lines(60).join("\n");
+        let terminal_title = terminal.breadcrumb_text.clone();
+        let detected =
+            crate::terminal_agent_status::classify(agent_cli, &screen_tail, &terminal_title);
+
+        let Some(store) = TerminalThreadMetadataStore::try_global(cx) else {
+            return;
+        };
+        store.update(cx, |store, cx| {
+            if store.active_agent_program(terminal_id).is_none() {
+                return;
+            }
+            let current_status = store.active_agent_status(terminal_id);
+            let next_status = match detected {
+                DetectedTerminalAgentStatus::Working => TerminalAgentStatus::Running,
+                DetectedTerminalAgentStatus::Blocked => TerminalAgentStatus::Blocked,
+                DetectedTerminalAgentStatus::Idle => match current_status {
+                    Some(TerminalAgentStatus::Running | TerminalAgentStatus::Blocked) => {
+                        TerminalAgentStatus::Finished
+                    }
+                    Some(status) => status,
+                    None => TerminalAgentStatus::Idle,
+                },
+                DetectedTerminalAgentStatus::Unknown if bell_triggered => {
+                    TerminalAgentStatus::Blocked
+                }
+                DetectedTerminalAgentStatus::Unknown => return,
+            };
+            store.set_active_agent_status(terminal_id, Some(next_status), cx);
+        });
     }
 
     fn persist_all_terminal_metadata(&self, cx: &mut Context<Self>) {
@@ -2431,6 +3016,8 @@ impl AgentPanel {
             worktree_paths: project.worktree_paths(cx),
             remote_connection: project.remote_connection_options(cx),
             working_directory: terminal.working_directory.clone(),
+            agent_cli: terminal.agent_cli.clone(),
+            agent_cli_session_prefix: terminal.agent_cli_session_prefix.clone(),
         })
     }
 
@@ -2455,15 +3042,43 @@ impl AgentPanel {
         self.pending_terminal_spawn = Some(metadata.terminal_id);
         let working_directory = self.terminal_restore_working_directory(&metadata, workspace, cx);
         let initial_title = Self::terminal_restore_initial_title(&metadata);
+        let agent_cli = metadata.agent_cli.clone();
+        let startup_command = agent_cli.as_deref().map(|agent_cli| {
+            metadata
+                .agent_cli_session_prefix
+                .as_deref()
+                .and_then(|session_prefix| {
+                    Self::agent_cli_resume_command(
+                        agent_cli,
+                        session_prefix,
+                        self.project.read(cx).path_style(cx),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    if agent_cli == "codex" {
+                        match self.project.read(cx).path_style(cx) {
+                            PathStyle::Windows => "Write-Error 'Pentip cannot resume this Codex thread because its saved session ID is missing'".to_string(),
+                            PathStyle::Unix => "printf '%s\\n' 'Pentip cannot resume this Codex thread because its saved session ID is missing'".to_string(),
+                        }
+                    } else {
+                        Self::agent_cli_start_command(agent_cli, Some(metadata.terminal_id))
+                    }
+                })
+        });
         self.spawn_terminal(
             metadata.terminal_id,
             working_directory,
-            metadata.custom_title.clone(),
+            metadata.custom_title.clone().or_else(|| {
+                (agent_cli.as_deref() == Some("codex")).then(|| metadata.display_title())
+            }),
             initial_title,
             Some(metadata.created_at),
             true,
             focus,
             true,
+            startup_command,
+            agent_cli,
+            metadata.agent_cli_session_prefix,
             source,
             window,
             cx,
@@ -2798,6 +3413,7 @@ impl AgentPanel {
                 }
                 AgentPanelEvent::EntryChanged
                 | AgentPanelEvent::TerminalCloseRequested { .. }
+                | AgentPanelEvent::TerminalGracefulCloseReady { .. }
                 | AgentPanelEvent::ThreadInteracted { .. } => {}
             }
         });
@@ -4991,6 +5607,7 @@ pub enum AgentPanelEvent {
     ActiveViewFocused,
     EntryChanged,
     TerminalCloseRequested { metadata: TerminalThreadMetadata },
+    TerminalGracefulCloseReady { metadata: TerminalThreadMetadata },
     ThreadInteracted { thread_id: ThreadId },
 }
 
@@ -5186,6 +5803,9 @@ impl AgentPanel {
             true,
             false,
             true,
+            None,
+            None,
+            None,
             source,
             window,
             cx,
@@ -5210,6 +5830,7 @@ impl AgentPanel {
             true,
             false,
             true,
+            None,
             source,
             window,
             cx,
@@ -5848,9 +6469,30 @@ impl AgentPanel {
         let can_create_entries = self.has_open_project(cx);
         let supports_terminal = self.supports_terminal(cx);
         let showing_terminal = matches!(self.visible_surface(), VisibleSurface::Terminal(_));
+        let active_terminal_agent_program = self
+            .active_terminal_id()
+            .and_then(|terminal_id| self.terminals.get(&terminal_id))
+            .and_then(|terminal| terminal.last_observed_program.as_deref());
+        let showing_codex = active_terminal_agent_program == Some("codex");
+        let showing_claude = active_terminal_agent_program == Some("claude");
+        let showing_pi = active_terminal_agent_program == Some("pi");
+        let showing_agy = active_terminal_agent_program == Some("agy");
 
         let (selected_agent_custom_icon, selected_agent_label) = if showing_terminal {
-            (None, SharedString::from("Terminal"))
+            (
+                None,
+                SharedString::from(if showing_codex {
+                    "Codex"
+                } else if showing_claude {
+                    "Claude"
+                } else if showing_pi {
+                    "Pi"
+                } else if showing_agy {
+                    "Antigravity"
+                } else {
+                    "Terminal"
+                }),
+            )
         } else if let Agent::Custom { id, .. } = &self.selected_agent {
             let store = agent_server_store.read(cx);
             let icon = store.agent_icon(&id);
@@ -5932,6 +6574,114 @@ impl AgentPanel {
                                                     {
                                                         panel.update(cx, |panel, cx| {
                                                             panel.new_terminal(
+                                                                Some(workspace),
+                                                                AgentThreadSource::AgentPanel,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        });
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }),
+                            )
+                            .item(
+                                ContextMenuEntry::new("Codex CLI")
+                                    .action(Box::new(NewCodexTerminalThread))
+                                    .icon(IconName::AiOpenAi)
+                                    .icon_color(Color::Muted)
+                                    .handler({
+                                        let workspace = workspace.clone();
+                                        move |window, cx| {
+                                            if let Some(workspace) = workspace.upgrade() {
+                                                workspace.update(cx, |workspace, cx| {
+                                                    if let Some(panel) =
+                                                        workspace.panel::<AgentPanel>(cx)
+                                                    {
+                                                        panel.update(cx, |panel, cx| {
+                                                            panel.new_codex_terminal(
+                                                                Some(workspace),
+                                                                AgentThreadSource::AgentPanel,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        });
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }),
+                            )
+                            .item(
+                                ContextMenuEntry::new("Claude CLI")
+                                    .action(Box::new(NewClaudeTerminalThread))
+                                    .icon(IconName::AiClaude)
+                                    .icon_color(Color::Muted)
+                                    .handler({
+                                        let workspace = workspace.clone();
+                                        move |window, cx| {
+                                            if let Some(workspace) = workspace.upgrade() {
+                                                workspace.update(cx, |workspace, cx| {
+                                                    if let Some(panel) =
+                                                        workspace.panel::<AgentPanel>(cx)
+                                                    {
+                                                        panel.update(cx, |panel, cx| {
+                                                            panel.new_claude_terminal(
+                                                                Some(workspace),
+                                                                AgentThreadSource::AgentPanel,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        });
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }),
+                            )
+                            .item(
+                                ContextMenuEntry::new("Pi CLI")
+                                    .action(Box::new(NewPiTerminalThread))
+                                    .icon(IconName::AiPi)
+                                    .icon_color(Color::Muted)
+                                    .handler({
+                                        let workspace = workspace.clone();
+                                        move |window, cx| {
+                                            if let Some(workspace) = workspace.upgrade() {
+                                                workspace.update(cx, |workspace, cx| {
+                                                    if let Some(panel) =
+                                                        workspace.panel::<AgentPanel>(cx)
+                                                    {
+                                                        panel.update(cx, |panel, cx| {
+                                                            panel.new_pi_terminal(
+                                                                Some(workspace),
+                                                                AgentThreadSource::AgentPanel,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        });
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }),
+                            )
+                            .item(
+                                ContextMenuEntry::new("Antigravity CLI")
+                                    .action(Box::new(NewAgyTerminalThread))
+                                    .icon(IconName::AiAntigravity)
+                                    .icon_color(Color::Muted)
+                                    .handler({
+                                        let workspace = workspace.clone();
+                                        move |window, cx| {
+                                            if let Some(workspace) = workspace.upgrade() {
+                                                workspace.update(cx, |workspace, cx| {
+                                                    if let Some(panel) =
+                                                        workspace.panel::<AgentPanel>(cx)
+                                                    {
+                                                        panel.update(cx, |panel, cx| {
+                                                            panel.new_agy_terminal(
                                                                 Some(workspace),
                                                                 AgentThreadSource::AgentPanel,
                                                                 window,
@@ -6057,7 +6807,13 @@ impl AgentPanel {
 
         let has_custom_icon = selected_agent_custom_icon.is_some();
         let selected_agent_builtin_icon = if showing_terminal {
-            Some(IconName::Terminal)
+            Some(if showing_codex {
+                IconName::AiOpenAi
+            } else if showing_claude {
+                IconName::AiClaude
+            } else {
+                IconName::Terminal
+            })
         } else {
             self.selected_agent.icon()
         };
@@ -6525,6 +7281,24 @@ impl Render for AgentPanel {
                 };
                 this.edit_terminal_title(terminal_id, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &NewCodexTerminalThread, window, cx| {
+                cx.stop_propagation();
+                this.new_codex_terminal(None, AgentThreadSource::AgentPanel, window, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &NewClaudeTerminalThread, window, cx| {
+                    cx.stop_propagation();
+                    this.new_claude_terminal(None, AgentThreadSource::AgentPanel, window, cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &NewPiTerminalThread, window, cx| {
+                cx.stop_propagation();
+                this.new_pi_terminal(None, AgentThreadSource::AgentPanel, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewAgyTerminalThread, window, cx| {
+                cx.stop_propagation();
+                this.new_agy_terminal(None, AgentThreadSource::AgentPanel, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_configuration(window, cx);
             }))
@@ -6754,6 +7528,7 @@ impl AgentPanel {
             focus,
             focus,
             true,
+            None,
             AgentThreadSource::AgentPanel,
             window,
             cx,
@@ -6782,19 +7557,49 @@ impl AgentPanel {
 
         let working_directory = self.terminal_restore_working_directory(&metadata, workspace, cx);
         let initial_title = Self::terminal_restore_initial_title(&metadata);
+        let startup_command = metadata.agent_cli.as_deref().and_then(|agent_cli| {
+            metadata
+                .agent_cli_session_prefix
+                .as_deref()
+                .and_then(|session_prefix| {
+                    Self::agent_cli_resume_command(
+                        agent_cli,
+                        session_prefix,
+                        self.project.read(cx).path_style(cx),
+                    )
+                })
+        });
+        let terminal_id = metadata.terminal_id;
+        let saved_session_prefix = metadata.agent_cli_session_prefix.clone();
         self.insert_display_only_terminal(
-            metadata.terminal_id,
+            terminal_id,
             working_directory,
-            metadata.custom_title.clone(),
+            metadata.custom_title.clone().or_else(|| {
+                (metadata.agent_cli.as_deref() == Some("codex")).then(|| metadata.display_title())
+            }),
             initial_title,
             Some(metadata.created_at),
             true,
             focus,
             true,
+            metadata.agent_cli,
             source,
             window,
             cx,
-        )
+        )?;
+        if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+            terminal.agent_cli_session_prefix = saved_session_prefix;
+        }
+        self.persist_terminal_metadata(terminal_id, cx);
+        if let Some(startup_command) = startup_command
+            && let Some(terminal) = self
+                .terminals
+                .get(&terminal_id)
+                .map(|terminal| terminal.view.read(cx).terminal().clone())
+        {
+            Self::write_terminal_startup_commands(&terminal, vec![startup_command], cx);
+        }
+        Ok(())
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -6808,6 +7613,7 @@ impl AgentPanel {
         select: bool,
         focus: bool,
         run_init_command: bool,
+        agent_cli: Option<String>,
         source: AgentThreadSource,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -6846,11 +7652,16 @@ impl AgentPanel {
             created_at,
             select,
             focus,
+            agent_cli,
             source,
             window,
             cx,
         );
-        Self::write_terminal_init_command(&terminal_for_init_command, init_command, cx);
+        Self::write_terminal_startup_commands(
+            &terminal_for_init_command,
+            init_command.into_iter().collect(),
+            cx,
+        );
         Ok(())
     }
 
@@ -6902,6 +7713,8 @@ mod tests {
     use project::{Project, WorktreePaths};
     use settings::{SettingsStore, WorkingDirectory};
     use std::any::Any;
+    use workspace::dock::test::{TestPanel, ToggleTestPanel};
+    use workspace::item::test::TestItem;
 
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -6936,12 +7749,326 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_terminal_codex_command_preserves_arguments() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir()?;
+        let executable = directory.path().join("codex");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
+        let command =
+            AgentPanel::terminal_agent_session_command(task::ShellKind::Posix, TerminalId::new())
+                .expect("POSIX shell should have a Codex function");
+        for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
+            if shell != "/bin/sh" && !Path::new(shell).is_file() {
+                continue;
+            }
+            let output = gpui::block_on(
+                util::command::new_command(shell)
+                    .args([
+                        "-c",
+                        &format!("{command}; codex resume 'session with spaces' --no-alt-screen"),
+                    ])
+                    .env("PATH", directory.path())
+                    .output(),
+            )?;
+            assert!(output.status.success(), "{shell}: {:?}", output.stderr);
+            assert_eq!(
+                String::from_utf8(output.stdout)?,
+                "-c\ntui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]\nresume\nsession with spaces\n--no-alt-screen\n"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_terminal_claude_command_assigns_only_new_session_ids() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir()?;
+        let executable = directory.path().join("claude");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
+        let terminal_id = TerminalId::new();
+        let session_id = terminal_id.to_key_string();
+        let command =
+            AgentPanel::terminal_agent_session_command(task::ShellKind::Posix, terminal_id)
+                .expect("POSIX shell should have a Claude function");
+
+        let new_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; claude 'initial prompt'")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(
+            String::from_utf8(new_output.stdout)?,
+            format!("--session-id\n{session_id}\ninitial prompt\n")
+        );
+
+        let resume_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args([
+                    "-c",
+                    &format!("{command}; claude --resume existing-session"),
+                ])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(
+            String::from_utf8(resume_output.stdout)?,
+            "--resume\nexisting-session\n"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_terminal_pi_command_assigns_only_new_session_ids() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir()?;
+        let executable = directory.path().join("pi");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
+        let terminal_id = TerminalId::new();
+        let session_id = terminal_id.to_key_string();
+        let command =
+            AgentPanel::terminal_agent_session_command(task::ShellKind::Posix, terminal_id)
+                .expect("POSIX shell should have a Pi function");
+
+        let new_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; pi 'initial prompt'")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(
+            String::from_utf8(new_output.stdout)?,
+            format!("--session-id\n{session_id}\ninitial prompt\n")
+        );
+
+        let resume_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; pi --session existing-session")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(
+            String::from_utf8(resume_output.stdout)?,
+            "--session\nexisting-session\n"
+        );
+
+        let continue_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; pi --continue")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(String::from_utf8(continue_output.stdout)?, "--continue\n");
+
+        let resume_picker_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; pi --resume")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(
+            String::from_utf8(resume_picker_output.stdout)?,
+            "--resume\n"
+        );
+
+        for subcommand in [
+            "install",
+            "remove",
+            "uninstall",
+            "update",
+            "list",
+            "config",
+            "auth",
+        ] {
+            let subcommand_output = gpui::block_on(
+                util::command::new_command("/bin/sh")
+                    .args(["-c", &format!("{command}; pi {subcommand}")])
+                    .env("PATH", directory.path())
+                    .output(),
+            )?;
+            assert_eq!(
+                String::from_utf8(subcommand_output.stdout)?,
+                format!("{subcommand}\n"),
+                "pi {subcommand} should run unmodified instead of starting a session"
+            );
+        }
+
+        let update_extensions_output = gpui::block_on(
+            util::command::new_command("/bin/sh")
+                .args(["-c", &format!("{command}; pi update --extensions")])
+                .env("PATH", directory.path())
+                .output(),
+        )?;
+        assert_eq!(
+            String::from_utf8(update_extensions_output.stdout)?,
+            "update\n--extensions\n"
+        );
+        Ok(())
+    }
+
     #[test]
     fn test_is_known_terminal_agent_command() {
         assert!(is_known_terminal_agent_command("claude"));
         assert!(is_known_terminal_agent_command("codex"));
+        assert!(is_known_terminal_agent_command("pi"));
         assert!(!is_known_terminal_agent_command("cargo"));
         assert!(!is_known_terminal_agent_command("internal-agent"));
+    }
+
+    #[test]
+    fn test_codex_session_prefix_from_terminal_title() {
+        assert_eq!(
+            codex_session_prefix("01a0960e-db2e-7082-b09d-cc25e..."),
+            Some("01a0960e-db2e-7082-b09d-cc25e".to_string())
+        );
+        assert_eq!(codex_session_prefix("Codex"), None);
+        assert_eq!(codex_session_prefix("short-id..."), None);
+        assert_eq!(
+            codex_session_prefix("01a0960e-db2e-7082-b09d-cc25e1234567"),
+            Some("01a0960e-db2e-7082-b09d-cc25e1234567".to_string())
+        );
+    }
+
+    #[test]
+    fn test_agy_conversation_id_from_screen() {
+        // The exact wording verified against the real CLI (agy 1.2.7).
+        assert_eq!(
+            agy_conversation_id_from_screen(
+                "Resume with -c (or command below):\nagy --conversation=e8611331-519a-43ae-9ebd-4b6f401859ea"
+            ),
+            Some("e8611331-519a-43ae-9ebd-4b6f401859ea".to_string())
+        );
+        // An older/alternate wording reported for the same hint should still
+        // parse, since the scan only anchors on `--conversation`.
+        assert_eq!(
+            agy_conversation_id_from_screen(
+                "Resume: agy --conversation=d1d8a55b-cc27-4dd4-bc62-2f73015960d2 (or -c)"
+            ),
+            Some("d1d8a55b-cc27-4dd4-bc62-2f73015960d2".to_string())
+        );
+        // The space form (as accepted by the CLI's own flag parser) also works.
+        assert_eq!(
+            agy_conversation_id_from_screen(
+                "agy --conversation e8611331-519a-43ae-9ebd-4b6f401859ea"
+            ),
+            Some("e8611331-519a-43ae-9ebd-4b6f401859ea".to_string())
+        );
+        // Picks the most recent hint when more than one is in the scrollback.
+        assert_eq!(
+            agy_conversation_id_from_screen(
+                "agy --conversation=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nagy --conversation=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+            ),
+            Some("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".to_string())
+        );
+        assert_eq!(agy_conversation_id_from_screen("Hi there!"), None);
+        assert_eq!(
+            agy_conversation_id_from_screen("agy --conversation not-a-uuid"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_codex_resume_command_resolves_exact_session_prefix() {
+        let prefix = "01a0960e-db2e-7082-b09d-cc25e";
+        let unix_command = AgentPanel::agent_cli_resume_command("codex", prefix, PathStyle::Unix)
+            .expect("Codex should have a Unix resume command");
+        assert!(unix_command.contains("*01a0960e-db2e-7082-b09d-cc25e*.jsonl"));
+        assert!(unix_command.contains("resume \"$session_id\""));
+
+        let windows_command =
+            AgentPanel::agent_cli_resume_command("codex", prefix, PathStyle::Windows)
+                .expect("Codex should have a Windows resume command");
+        assert!(windows_command.contains("*01a0960e-db2e-7082-b09d-cc25e*.jsonl"));
+        assert!(windows_command.contains("resume $sessionId"));
+    }
+
+    #[test]
+    fn test_codex_resume_command_uses_full_session_id_without_lookup() {
+        let session_id = "01a0960e-db2e-7082-b09d-cc25e1234567";
+        for path_style in [PathStyle::Unix, PathStyle::Windows] {
+            let command = AgentPanel::agent_cli_resume_command("codex", session_id, path_style);
+            assert_eq!(
+                command.as_deref(),
+                Some(
+                    "codex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]' resume 01a0960e-db2e-7082-b09d-cc25e1234567"
+                )
+            );
+        }
+        assert!(
+            AgentPanel::agent_cli_resume_command("codex", "invalid; command", PathStyle::Unix)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_claude_start_and_resume_commands_use_session_id() {
+        let terminal_id = TerminalId::new();
+        let session_id = terminal_id.to_key_string();
+
+        assert_eq!(
+            AgentPanel::agent_cli_start_command("claude", Some(terminal_id)),
+            format!("claude --session-id {session_id}")
+        );
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("claude", &session_id, PathStyle::Unix),
+            Some(format!("claude --resume {session_id}"))
+        );
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("claude", "invalid; command", PathStyle::Unix),
+            None
+        );
+    }
+
+    #[test]
+    fn test_pi_start_and_resume_commands_use_session_id() {
+        let terminal_id = TerminalId::new();
+        let session_id = terminal_id.to_key_string();
+
+        assert_eq!(
+            AgentPanel::agent_cli_start_command("pi", Some(terminal_id)),
+            format!("pi --session-id {session_id}")
+        );
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("pi", &session_id, PathStyle::Unix),
+            Some(format!("pi --session {session_id}"))
+        );
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("pi", "invalid; command", PathStyle::Unix),
+            None
+        );
+    }
+
+    #[test]
+    fn test_agy_resume_command_uses_discovered_session_id() {
+        // Unlike Claude/Pi, agy has no start-with-chosen-id flag, so a fresh
+        // terminal just runs plain `agy` -- the resume command only exists
+        // once a conversation id has been discovered from the screen (see
+        // `agy_conversation_id_from_screen`).
+        let terminal_id = TerminalId::new();
+        assert_eq!(
+            AgentPanel::agent_cli_start_command("agy", Some(terminal_id)),
+            "agy"
+        );
+
+        let session_id = terminal_id.to_key_string();
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("agy", &session_id, PathStyle::Unix),
+            Some(format!("agy --conversation {session_id}"))
+        );
+        assert_eq!(
+            AgentPanel::agent_cli_resume_command("agy", "invalid; command", PathStyle::Unix),
+            None
+        );
     }
 
     #[test]
@@ -6949,35 +8076,35 @@ mod tests {
         let mut last_observed_program = None;
 
         assert_eq!(
-            terminal_program_to_report(&mut last_observed_program, Some("codex".to_string())),
-            Some("codex".to_string())
+            terminal_program_update(&mut last_observed_program, Some("codex".to_string())),
+            (Some("codex".to_string()), true)
         );
         assert_eq!(
-            terminal_program_to_report(&mut last_observed_program, Some("codex".to_string())),
-            None
+            terminal_program_update(&mut last_observed_program, Some("codex".to_string())),
+            (None, false)
         );
         assert_eq!(
-            terminal_program_to_report(&mut last_observed_program, Some("zsh".to_string())),
-            None
+            terminal_program_update(&mut last_observed_program, Some("zsh".to_string())),
+            (None, true)
         );
         assert_eq!(
-            terminal_program_to_report(
+            terminal_program_update(
                 &mut last_observed_program,
                 Some("customer-data-export".to_string())
             ),
-            None
+            (None, false)
         );
         assert_eq!(
-            terminal_program_to_report(&mut last_observed_program, Some("codex".to_string())),
-            Some("codex".to_string())
+            terminal_program_update(&mut last_observed_program, Some("codex".to_string())),
+            (Some("codex".to_string()), true)
         );
         assert_eq!(
-            terminal_program_to_report(&mut last_observed_program, None),
-            None
+            terminal_program_update(&mut last_observed_program, None),
+            (None, true)
         );
         assert_eq!(
-            terminal_program_to_report(&mut last_observed_program, Some("codex".to_string())),
-            Some("codex".to_string())
+            terminal_program_update(&mut last_observed_program, Some("codex".to_string())),
+            (Some("codex".to_string()), true)
         );
     }
 
@@ -7609,6 +8736,8 @@ mod tests {
             worktree_paths: project.read_with(cx, |project, cx| project.worktree_paths(cx)),
             remote_connection: None,
             working_directory: None,
+            agent_cli: None,
+            agent_cli_session_prefix: None,
         };
         assert_eq!(metadata.working_directory, None);
 
@@ -7693,6 +8822,8 @@ mod tests {
             )])),
             remote_connection: None,
             working_directory: None,
+            agent_cli: None,
+            agent_cli_session_prefix: None,
         };
         let terminal_id = metadata.terminal_id;
         panel
@@ -7783,6 +8914,9 @@ mod tests {
                 true,
                 true,
                 true,
+                None,
+                None,
+                None,
                 AgentThreadSource::AgentPanel,
                 window,
                 cx,
@@ -7828,7 +8962,12 @@ mod tests {
         let input_log = terminal.update(&mut cx, |terminal, _| terminal.take_input_log());
         assert_eq!(
             input_log,
-            vec![b"printf 'init_ran_%s\\n' 42\r".to_vec()],
+            vec![AgentPanel::terminal_startup_input(vec![
+                AgentPanel::terminal_agent_session_command(task::ShellKind::Posix, terminal_id,)
+                    .expect("POSIX shell should have a Codex function"),
+                AgentPanel::terminal_clear_command(task::ShellKind::Posix),
+                "printf 'init_ran_%s\\n' 42".to_string(),
+            ])],
             "init command should be written only after terminal startup has settled"
         );
         assert!(
@@ -7866,6 +9005,8 @@ mod tests {
             )])),
             remote_connection: None,
             working_directory: None,
+            agent_cli: None,
+            agent_cli_session_prefix: None,
         };
         panel
             .update_in(&mut cx, |panel, window, cx| {
@@ -9284,6 +10425,7 @@ mod tests {
                     true,
                     true,
                     false,
+                    None,
                     AgentThreadSource::AgentPanel,
                     window,
                     cx,
@@ -9400,6 +10542,342 @@ mod tests {
         });
 
         (panel, cx)
+    }
+
+    #[gpui::test]
+    async fn test_terminal_agent_status_updates_during_output(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.update(|_, cx| TerminalThreadMetadataStore::init_global(cx));
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_codex_terminal(None, AgentThreadSource::AgentPanel, window, cx);
+        });
+        let (terminal_id, terminal_entity) = panel.read_with(&cx, |panel, cx| {
+            let (&terminal_id, terminal) = panel.terminals.iter().next().expect("Codex terminal");
+            (terminal_id, terminal.view.read(cx).terminal().clone())
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.set_active_agent_program(terminal_id, Some("codex".to_string()), cx);
+                store.set_active_agent_status(terminal_id, Some(TerminalAgentStatus::Idle), cx);
+            });
+        });
+        terminal_entity.update(&mut cx, |terminal, _| {
+            terminal.breadcrumb_text = "Fix sidebar | session | Working".to_string();
+        });
+        panel.update_in(&mut cx, |panel, _, cx| {
+            panel.schedule_terminal_agent_status_classification(terminal_id, cx);
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(200));
+        panel.update_in(&mut cx, |panel, _, cx| {
+            panel.schedule_terminal_agent_status_classification(terminal_id, cx);
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .active_agent_status(terminal_id),
+                Some(TerminalAgentStatus::Running)
+            );
+        });
+        terminal_entity.update(&mut cx, |terminal, _| {
+            terminal.breadcrumb_text = "Fix sidebar | session | Ready".to_string();
+        });
+        panel.update_in(&mut cx, |panel, _, cx| {
+            panel.reclassify_terminal_agent_status(terminal_id, false, cx);
+        });
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                assert_eq!(
+                    store.active_agent_status(terminal_id),
+                    Some(TerminalAgentStatus::Finished)
+                );
+                store.set_active_agent_program(terminal_id, None, cx);
+                store.set_active_agent_status(terminal_id, None, cx);
+            });
+        });
+        panel.update_in(&mut cx, |panel, _, cx| {
+            panel.reclassify_terminal_agent_status(terminal_id, true, cx);
+        });
+        cx.update(|_, cx| {
+            assert_eq!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .active_agent_status(terminal_id),
+                None
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_codex_terminal_startup_is_visible_to_thread_sidebar(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::init_global(cx);
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.terminal_init_command = Some("prepare-codex".to_string());
+            AgentSettings::override_global(settings, cx);
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_codex_terminal(None, AgentThreadSource::AgentPanel, window, cx);
+        });
+
+        let (terminal_id, title, terminal_entity) = panel.read_with(&cx, |panel, cx| {
+            let (&terminal_id, terminal) = panel
+                .terminals
+                .iter()
+                .next()
+                .expect("Codex terminal should be present");
+            (
+                terminal_id,
+                terminal.title(cx),
+                terminal.view.read(cx).terminal().clone(),
+            )
+        });
+        let input_log = terminal_entity.update(&mut cx, |terminal, _| terminal.take_input_log());
+        assert_eq!(title.as_ref(), "Codex");
+        assert_eq!(
+            input_log,
+            vec![
+                b"prepare-codex\rcodex -c 'tui.terminal_title=[\"activity\",\"thread-name\",\"thread-id\",\"status\"]'\r"
+                    .to_vec()
+            ]
+        );
+
+        let metadata = cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).read_with(cx, |store, _cx| {
+                store
+                    .entry(terminal_id)
+                    .cloned()
+                    .expect("sidebar metadata should include the Codex terminal")
+            })
+        });
+        assert_eq!(metadata.display_title().as_ref(), "Codex");
+        assert_eq!(metadata.agent_cli.as_deref(), Some("codex"));
+
+        terminal_entity.update(&mut cx, |terminal, cx| {
+            terminal.breadcrumb_text =
+                "Fix terminal resume | 01a0960e-db2e-7082-b09d-cc25e...".to_string();
+            cx.emit(TerminalEvent::BreadcrumbsChanged);
+        });
+        cx.run_until_parked();
+
+        let session_prefix = cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).read_with(cx, |store, _cx| {
+                store
+                    .entry(terminal_id)
+                    .and_then(|metadata| metadata.agent_cli_session_prefix.clone())
+            })
+        });
+        assert_eq!(
+            session_prefix.as_deref(),
+            Some("01a0960e-db2e-7082-b09d-cc25e")
+        );
+        assert_eq!(
+            panel.read_with(&cx, |panel, cx| panel
+                .terminals
+                .get(&terminal_id)
+                .expect("Codex terminal")
+                .title(cx)),
+            "Fix terminal resume"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_manual_codex_terminal_saves_session_for_restore(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.update(|_, cx| TerminalThreadMetadataStore::init_global(cx));
+        let terminal_id = TerminalId::new();
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel
+                .insert_display_only_terminal(
+                    terminal_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    true,
+                    true,
+                    false,
+                    None,
+                    AgentThreadSource::AgentPanel,
+                    window,
+                    cx,
+                )
+                .expect("terminal should open");
+        });
+        let terminal_entity = panel.read_with(&cx, |panel, cx| {
+            panel
+                .terminals
+                .get(&terminal_id)
+                .expect("terminal")
+                .view
+                .read(cx)
+                .terminal()
+                .clone()
+        });
+        terminal_entity.update(&mut cx, |terminal, cx| {
+            terminal.breadcrumb_text = "01a0960e-db2e-7082-b09d-cc25e...".to_string();
+            cx.emit(TerminalEvent::BreadcrumbsChanged);
+        });
+        cx.run_until_parked();
+        let metadata = cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx)
+                .read(cx)
+                .entry(terminal_id)
+                .cloned()
+                .expect("saved terminal")
+        });
+        assert_eq!(metadata.agent_cli.as_deref(), Some("codex"));
+        assert_eq!(
+            metadata.agent_cli_session_prefix.as_deref(),
+            Some("01a0960e-db2e-7082-b09d-cc25e")
+        );
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.close_terminal(terminal_id, window, cx);
+            panel
+                .restore_test_terminal(
+                    metadata,
+                    true,
+                    AgentThreadSource::AgentPanel,
+                    None,
+                    window,
+                    cx,
+                )
+                .expect("terminal should restore");
+        });
+        let input = panel
+            .read_with(&cx, |panel, cx| {
+                panel
+                    .terminals
+                    .get(&terminal_id)
+                    .expect("restored terminal")
+                    .view
+                    .read(cx)
+                    .terminal()
+                    .clone()
+            })
+            .update(&mut cx, |terminal, _| terminal.take_input_log());
+        let command =
+            String::from_utf8(input.into_iter().flatten().collect()).expect("UTF-8 command");
+        if PathStyle::local().is_windows() {
+            assert!(command.contains("resume $sessionId"));
+        } else {
+            assert!(command.contains("resume \"$session_id\""));
+        }
+        assert!(command.contains("*01a0960e-db2e-7082-b09d-cc25e*.jsonl"));
+    }
+
+    #[gpui::test]
+    async fn test_codex_terminal_restore_uses_saved_session_prefix(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        let terminal_id = TerminalId::new();
+        let metadata = TerminalThreadMetadata {
+            terminal_id,
+            title: "Update thread sidebar icons | Pentip".into(),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
+                "/project",
+            )])),
+            remote_connection: None,
+            working_directory: Some(PathBuf::from("/project")),
+            agent_cli: Some("codex".to_string()),
+            agent_cli_session_prefix: Some("01a0960e-db2e-7082-b09d-cc25e".to_string()),
+        };
+
+        panel
+            .update_in(&mut cx, |panel, window, cx| {
+                panel.restore_test_terminal(
+                    metadata,
+                    true,
+                    AgentThreadSource::AgentPanel,
+                    None,
+                    window,
+                    cx,
+                )
+            })
+            .expect("Codex terminal should be restored");
+
+        let input_log = panel.read_with(&cx, |panel, cx| {
+            assert_eq!(
+                panel
+                    .terminals
+                    .get(&terminal_id)
+                    .expect("restored terminal")
+                    .title(cx)
+                    .as_ref(),
+                "Update thread sidebar icons | Pentip"
+            );
+            panel
+                .terminals
+                .get(&terminal_id)
+                .expect("restored Codex terminal should be present")
+                .view
+                .read(cx)
+                .terminal()
+                .clone()
+        });
+        let input_log = input_log.update(&mut cx, |terminal, _| terminal.take_input_log());
+        assert_eq!(input_log.len(), 1);
+        let command = String::from_utf8(input_log[0].clone()).expect("command should be UTF-8");
+        assert!(command.contains("*01a0960e-db2e-7082-b09d-cc25e*.jsonl"));
+        if PathStyle::local().is_windows() {
+            assert!(command.contains("resume $sessionId"));
+        } else {
+            assert!(command.contains("resume \"$session_id\""));
+        }
+        panel.update_in(&mut cx, |panel, _, cx| {
+            let terminal = panel
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("restored terminal");
+            assert_eq!(
+                terminal.agent_cli_session_prefix.as_deref(),
+                Some("01a0960e-db2e-7082-b09d-cc25e")
+            );
+            terminal.last_observed_program = Some("codex".to_string());
+            panel.report_terminal_program(terminal_id, AgentThreadSource::AgentPanel, cx);
+            let metadata = panel
+                .terminal_metadata(terminal_id, cx)
+                .expect("saved terminal");
+            assert_eq!(metadata.agent_cli.as_deref(), Some("codex"));
+            assert_eq!(
+                metadata.agent_cli_session_prefix.as_deref(),
+                Some("01a0960e-db2e-7082-b09d-cc25e")
+            );
+        });
+        let terminal_entity = panel.read_with(&cx, |panel, cx| {
+            panel
+                .terminals
+                .get(&terminal_id)
+                .expect("restored terminal")
+                .view
+                .read(cx)
+                .terminal()
+                .clone()
+        });
+        terminal_entity.update(&mut cx, |terminal, cx| {
+            terminal.breadcrumb_text = "01a0960e-db2e-7082-b09d-cc25e...".to_string();
+            cx.emit(TerminalEvent::BreadcrumbsChanged);
+        });
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, cx| {
+            assert_eq!(
+                panel
+                    .terminals
+                    .get(&terminal_id)
+                    .expect("restored terminal")
+                    .title(cx)
+                    .as_ref(),
+                "Update thread sidebar icons | Pentip"
+            );
+        });
     }
 
     async fn setup_visible_panel(
@@ -9954,6 +11432,8 @@ mod tests {
             )])),
             remote_connection: None,
             working_directory: None,
+            agent_cli: None,
+            agent_cli_session_prefix: None,
         };
 
         panel.update_in(&mut cx, |panel, window, cx| {
@@ -10005,6 +11485,8 @@ mod tests {
             )])),
             remote_connection: None,
             working_directory: None,
+            agent_cli: None,
+            agent_cli_session_prefix: None,
         };
 
         panel.update_in(&mut cx, |panel, window, cx| {
@@ -10477,21 +11959,17 @@ mod tests {
             .expect("test terminal should be inserted");
         cx.run_until_parked();
 
-        let workspace = cx.update(|window, cx| {
+        let multi_workspace = cx.update(|window, _cx| {
             window
                 .root::<MultiWorkspace>()
                 .flatten()
                 .expect("test window should have a MultiWorkspace root")
-                .read(cx)
-                .workspace()
-                .clone()
         });
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.focus_handle(cx).focus(window, cx);
+        multi_workspace.update_in(&mut cx, |multi_workspace, window, cx| {
+            multi_workspace.focus_sidebar(window, cx);
         });
         cx.update(|window, cx| {
             assert!(window.is_window_active());
-            assert!(workspace.read(cx).focus_handle(cx).is_focused(window));
             assert!(!panel.read(cx).focus_handle(cx).contains_focused(window, cx));
         });
 
@@ -10513,6 +11991,269 @@ mod tests {
                 .iter()
                 .all(|window| window.downcast::<AgentNotification>().is_none())
         );
+    }
+
+    #[gpui::test]
+    async fn test_editor_mode_does_not_render_agent_panel_dock(cx: &mut TestAppContext) {
+        let (_panel, mut cx) = setup_visible_panel(cx).await;
+
+        assert!(cx.debug_bounds("agent-mode-workspace").is_some());
+
+        cx.dispatch_action(workspace::ToggleAgentMode);
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("agent-mode-workspace").is_none());
+        assert!(cx.debug_bounds("left-dock").is_none());
+    }
+
+    #[gpui::test]
+    async fn test_agent_mode_sidebar_can_be_toggled(cx: &mut TestAppContext) {
+        let (_panel, mut cx) = setup_visible_panel(cx).await;
+        let multi_workspace = cx.update(|window, _cx| {
+            window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .expect("test window should have a MultiWorkspace root")
+        });
+
+        multi_workspace.read_with(&cx, |multi_workspace, cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Agent
+            );
+            assert!(multi_workspace.sidebar_render_state(cx).open);
+        });
+
+        multi_workspace.update_in(&mut cx, |multi_workspace, window, cx| {
+            multi_workspace.toggle_sidebar(window, cx);
+        });
+        multi_workspace.read_with(&cx, |multi_workspace, cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Agent
+            );
+            assert!(!multi_workspace.sidebar_render_state(cx).open);
+        });
+
+        multi_workspace.update_in(&mut cx, |multi_workspace, window, cx| {
+            multi_workspace.toggle_sidebar(window, cx);
+        });
+        multi_workspace.read_with(&cx, |multi_workspace, cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Agent
+            );
+            assert!(multi_workspace.sidebar_render_state(cx).open);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_agent_panel_button_switches_agentic_modes(cx: &mut TestAppContext) {
+        let (_panel, mut cx) = setup_visible_panel(cx).await;
+        let multi_workspace = cx.update(|window, _cx| {
+            window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .expect("test window should have a MultiWorkspace root")
+        });
+
+        let agent_button = cx
+            .debug_bounds("agent-panel-status-button")
+            .expect("Agent Panel button should be visible in Agent Mode");
+        cx.simulate_click(agent_button.center(), Modifiers::default());
+        cx.run_until_parked();
+        multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Editor
+            );
+        });
+
+        let agent_button = cx
+            .debug_bounds("agent-panel-status-button")
+            .expect("Agent Panel button should be visible in Editor Mode");
+        cx.simulate_click(agent_button.center(), Modifiers::default());
+        cx.run_until_parked();
+        multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Agent
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_panel_button_opens_panel_from_agentic_editor_mode(cx: &mut TestAppContext) {
+        let (_panel, mut cx) = setup_visible_panel(cx).await;
+        let multi_workspace = cx.update(|window, _cx| {
+            window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .expect("test window should have a MultiWorkspace root")
+        });
+        let workspace = multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            multi_workspace.workspace().clone()
+        });
+        let test_panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.register_action(|workspace, _: &ToggleTestPanel, window, cx| {
+                workspace.toggle_panel_focus::<TestPanel>(window, cx);
+            });
+            let test_panel = cx
+                .new(|cx| TestPanel::new_with_icon(DockPosition::Left, 1, IconName::FileTree, cx));
+            workspace.add_panel(test_panel.clone(), window, cx);
+            test_panel
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(workspace::ToggleAgentMode);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("left-dock").is_none());
+
+        let test_panel_button = cx
+            .debug_bounds("testpanel-status-button")
+            .expect("test panel button should be visible in Editor Mode");
+        cx.simulate_click(test_panel_button.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("left-dock").is_some());
+        workspace.read_with(&cx, |workspace, cx| {
+            let left_dock = workspace.left_dock().read(cx);
+            assert!(left_dock.is_open());
+            assert_eq!(
+                left_dock.active_panel().map(|panel| panel.panel_id()),
+                Some(test_panel.entity_id())
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_thread_focus_preserves_agentic_editor_dock(cx: &mut TestAppContext) {
+        let (_panel, mut cx) = setup_visible_panel(cx).await;
+        let multi_workspace = cx.update(|window, _cx| {
+            window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .expect("test window should have a MultiWorkspace root")
+        });
+        let workspace = multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            multi_workspace.workspace().clone()
+        });
+        let test_panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let test_panel = cx
+                .new(|cx| TestPanel::new_with_icon(DockPosition::Left, 1, IconName::FileTree, cx));
+            workspace.add_panel(test_panel.clone(), window, cx);
+            test_panel
+        });
+
+        cx.dispatch_action(workspace::ToggleAgentMode);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focus_panel::<TestPanel>(window, cx);
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(workspace::ToggleAgentMode);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(workspace.read_with(&cx, |_, cx| AgentPanel::is_visible(&workspace, cx)));
+
+        cx.dispatch_action(workspace::ToggleAgentMode);
+        cx.run_until_parked();
+
+        multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Editor
+            );
+        });
+        workspace.read_with(&cx, |workspace, cx| {
+            let left_dock = workspace.left_dock().read(cx);
+            assert!(left_dock.is_open());
+            assert_eq!(
+                left_dock.active_panel().map(|panel| panel.panel_id()),
+                Some(test_panel.entity_id())
+            );
+        });
+        assert!(cx.debug_bounds("left-dock").is_some());
+    }
+
+    #[gpui::test]
+    async fn test_center_item_actions_switch_to_agentic_editor_mode(cx: &mut TestAppContext) {
+        let (_panel, mut cx) = setup_visible_panel(cx).await;
+        let multi_workspace = cx.update(|window, _cx| {
+            window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .expect("test window should have a MultiWorkspace root")
+        });
+        let workspace = multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            multi_workspace.workspace().clone()
+        });
+        let item = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let item = cx.new(TestItem::new);
+            workspace.add_item_to_active_pane(Box::new(item.clone()), None, true, window, cx);
+            item
+        });
+        cx.run_until_parked();
+
+        multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Editor
+            );
+        });
+
+        cx.dispatch_action(workspace::ToggleAgentMode);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            assert!(workspace.activate_item(&item, true, true, window, cx));
+        });
+        cx.run_until_parked();
+
+        multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Editor
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_opening_agent_link_switches_to_editor_mode(cx: &mut TestAppContext) {
+        let (_panel, mut cx) = setup_visible_panel(cx).await;
+        let multi_workspace = cx.update(|window, _cx| {
+            window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .expect("test window should have a MultiWorkspace root")
+        });
+        let workspace = multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            multi_workspace.workspace().clone()
+        });
+
+        multi_workspace.update_in(&mut cx, |_, window, cx| {
+            crate::conversation_view::open_link(
+                "file.txt".into(),
+                &workspace.downgrade(),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        multi_workspace.read_with(&cx, |multi_workspace, _cx| {
+            assert_eq!(
+                multi_workspace.agentic_mode(),
+                workspace::AgenticMode::Editor
+            );
+        });
+        workspace.read_with(&cx, |workspace, cx| {
+            let active_path = workspace
+                .active_item(cx)
+                .and_then(|item| item.project_path(cx))
+                .expect("file link should open in the Workspace");
+            assert_eq!(active_path.path.as_unix_str(), "file.txt");
+        });
     }
 
     #[gpui::test]
@@ -10629,6 +12370,15 @@ mod tests {
 
         panel.read_with(&cx, |panel, _cx| {
             assert_eq!(panel.active_terminal_id(), Some(second_terminal_id));
+        });
+        cx.update(|window, cx| {
+            let multi_workspace = window
+                .root::<MultiWorkspace>()
+                .flatten()
+                .expect("test window should have a MultiWorkspace root");
+            multi_workspace.update(cx, |multi_workspace, cx| {
+                multi_workspace.close_sidebar(window, cx);
+            });
         });
         panel.update(&mut cx, |panel, cx| {
             panel.emit_test_terminal_bell(first_terminal_id, cx);

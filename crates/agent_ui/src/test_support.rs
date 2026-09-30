@@ -2,8 +2,9 @@ use acp_thread::{AgentConnection, StubAgentConnection};
 use agent_client_protocol::schema::v1 as acp;
 use agent_servers::{AgentServer, AgentServerDelegate};
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    Pixels, Render, Task, TestAppContext, VisualTestContext, Window, div, px,
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, Pixels, Render, Task, TestAppContext, VisualTestContext,
+    Window, div, px,
 };
 use project::AgentId;
 use project::Project;
@@ -200,8 +201,8 @@ impl WorkspaceSidebar for TestWorkspaceSidebar {
 }
 
 impl Render for TestWorkspaceSidebar {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().track_focus(&self.focus_handle(cx))
     }
 }
 

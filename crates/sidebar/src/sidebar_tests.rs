@@ -2126,6 +2126,128 @@ async fn test_agent_panel_terminals_appear_in_sidebar_and_search(cx: &mut TestAp
         );
     });
 
+    for (agent_cli, expected_icon) in [
+        ("codex", IconName::AiOpenAi),
+        ("claude", IconName::AiClaude),
+        ("pi", IconName::AiPi),
+        ("agy", IconName::AiAntigravity),
+    ] {
+        cx.update(|_, cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                let mut metadata = store.entry(terminal_id).expect("terminal metadata").clone();
+                metadata.agent_cli = Some(agent_cli.to_string());
+                store.save(metadata, cx);
+                store.set_active_agent_program(terminal_id, Some("pwsh".to_string()), cx);
+            });
+        });
+        cx.run_until_parked();
+        sidebar.read_with(cx, |sidebar, _cx| {
+            let terminal = sidebar
+                .contents
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    ListEntry::Terminal(terminal)
+                        if terminal.metadata.terminal_id == terminal_id =>
+                    {
+                        Some(terminal)
+                    }
+                    _ => None,
+                })
+                .expect("agent terminal should be visible");
+            assert_eq!(terminal.icon, expected_icon);
+        });
+    }
+
+    cx.update(|_, cx| {
+        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.set_active_agent_program(terminal_id, Some("codex".to_string()), cx);
+            store.set_active_agent_status(terminal_id, Some(TerminalAgentStatus::Running), cx);
+        });
+    });
+    cx.run_until_parked();
+    sidebar.read_with(cx, |sidebar, _cx| {
+        let terminal = sidebar
+            .contents
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                ListEntry::Terminal(terminal) if terminal.metadata.terminal_id == terminal_id => {
+                    Some(terminal)
+                }
+                _ => None,
+            })
+            .expect("running Codex terminal should be visible");
+        assert_eq!(terminal.icon, IconName::AiOpenAi);
+        assert_eq!(terminal.status, AgentThreadStatus::Running);
+    });
+
+    cx.update(|_, cx| {
+        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.set_active_agent_status(terminal_id, Some(TerminalAgentStatus::Blocked), cx);
+        });
+    });
+    cx.run_until_parked();
+    sidebar.read_with(cx, |sidebar, _cx| {
+        let terminal = sidebar
+            .contents
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                ListEntry::Terminal(terminal) if terminal.metadata.terminal_id == terminal_id => {
+                    Some(terminal)
+                }
+                _ => None,
+            })
+            .expect("blocked Codex terminal should be visible");
+        assert_eq!(terminal.status, AgentThreadStatus::WaitingForConfirmation);
+    });
+
+    cx.update(|_, cx| {
+        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.set_active_agent_status(terminal_id, Some(TerminalAgentStatus::Finished), cx);
+        });
+    });
+    cx.run_until_parked();
+    sidebar.read_with(cx, |sidebar, _cx| {
+        let terminal = sidebar
+            .contents
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                ListEntry::Terminal(terminal) if terminal.metadata.terminal_id == terminal_id => {
+                    Some(terminal)
+                }
+                _ => None,
+            })
+            .expect("finished Codex terminal should be visible");
+        assert_eq!(terminal.status, AgentThreadStatus::Completed);
+        assert_eq!(terminal.icon_color, Some(Color::Warning));
+    });
+
+    cx.update(|_, cx| {
+        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.set_active_agent_program(terminal_id, Some("claude".to_string()), cx);
+            store.set_active_agent_status(terminal_id, Some(TerminalAgentStatus::Running), cx);
+        });
+    });
+    cx.run_until_parked();
+    sidebar.read_with(cx, |sidebar, _cx| {
+        let terminal = sidebar
+            .contents
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                ListEntry::Terminal(terminal) if terminal.metadata.terminal_id == terminal_id => {
+                    Some(terminal)
+                }
+                _ => None,
+            })
+            .expect("running Claude terminal should be visible");
+        assert_eq!(terminal.icon, IconName::AiClaude);
+        assert_eq!(terminal.status, AgentThreadStatus::Running);
+    });
+
     type_in_search(&sidebar, "server", cx);
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
@@ -2300,6 +2422,8 @@ async fn test_terminal_metadata_is_deduped_across_project_groups(cx: &mut TestAp
         .unwrap(),
         remote_connection: None,
         working_directory: None,
+        agent_cli: None,
+        agent_cli_session_prefix: None,
     };
 
     cx.update(|_, cx| {
@@ -2327,6 +2451,51 @@ async fn test_terminal_metadata_is_deduped_across_project_groups(cx: &mut TestAp
             1
         );
     });
+}
+
+#[gpui::test]
+async fn test_sidebar_can_start_each_agent_cli(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    cx.update(|cx| {
+        cx.update_flags(true, vec!["agent-panel-terminal".to_string()]);
+    });
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    let workspace = multi_workspace.read_with(cx, |multi_workspace, _cx| {
+        multi_workspace.workspace().clone()
+    });
+    cx.run_until_parked();
+    assert!(workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .project()
+            .read(cx)
+            .visible_worktrees(cx)
+            .next()
+            .is_some()
+    }));
+    assert!(panel.read_with(cx, |panel, cx| panel.supports_terminal(cx)));
+
+    for agent_cli in [
+        AgentCli::Codex,
+        AgentCli::Claude,
+        AgentCli::Pi,
+        AgentCli::Antigravity,
+    ] {
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.create_new_agent_cli_terminal(&workspace, agent_cli, window, cx);
+        });
+    }
+
+    let mut programs = cx.update(|_, cx| {
+        TerminalThreadMetadataStore::global(cx)
+            .read(cx)
+            .entries()
+            .filter_map(|metadata| metadata.agent_cli.clone())
+            .collect::<Vec<_>>()
+    });
+    programs.sort();
+    assert_eq!(programs, ["agy", "claude", "codex", "pi"]);
 }
 
 #[gpui::test]
@@ -3531,6 +3700,8 @@ async fn test_thread_switcher_includes_terminal_metadata_for_open_project_group(
         .unwrap(),
         remote_connection: None,
         working_directory: None,
+        agent_cli: None,
+        agent_cli_session_prefix: None,
     };
     cx.update(|_, cx| {
         TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
@@ -3638,6 +3809,8 @@ async fn test_thread_switcher_preserves_closed_terminal_linked_worktree_workspac
         .unwrap(),
         remote_connection: None,
         working_directory: None,
+        agent_cli: None,
+        agent_cli_session_prefix: None,
     };
     cx.update(|_, cx| {
         TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
@@ -3786,6 +3959,8 @@ async fn test_archive_selected_terminal_archives_closed_linked_worktree(cx: &mut
         .unwrap(),
         remote_connection: None,
         working_directory: None,
+        agent_cli: None,
+        agent_cli_session_prefix: None,
     };
     cx.update(|_, cx| {
         TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {

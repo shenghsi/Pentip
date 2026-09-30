@@ -32,7 +32,7 @@ Zed Agent profiles, Zed Agent tool permissions, Zed Skills, and Zed Agent MCP se
 
 ## Opening a Terminal Thread {#opening-a-terminal-thread}
 
-Open the new-thread menu from the [Agent Panel](./agent-panel.md) using the agent selector button on the left or the `+` icon in the top-right of the panel toolbar, then choose **Terminal**. The Terminal Thread opens in the panel body, just like switching to an agent thread.
+Open the new-thread menu from the [Agent Panel](./agent-panel.md) using the agent selector button on the left or the `+` icon in the top-right of the panel toolbar. Choose **Terminal** to open a shell. Choose **Codex CLI** to open a shell and start `codex` in it. The Terminal Thread opens in the panel body, like an agent thread.
 
 You can open as many Terminal Threads as you like. Each gets its own entry in the Threads Sidebar.
 

@@ -53,6 +53,8 @@ pub struct TerminalThreadMetadata {
     pub worktree_paths: WorktreePaths,
     pub remote_connection: Option<RemoteConnectionOptions>,
     pub working_directory: Option<PathBuf>,
+    pub agent_cli: Option<String>,
+    pub agent_cli_session_prefix: Option<String>,
 }
 
 impl TerminalThreadMetadata {
@@ -65,10 +67,24 @@ impl TerminalThreadMetadata {
     }
 
     pub fn display_title(&self) -> SharedString {
-        compose_terminal_thread_title(
+        let title = compose_terminal_thread_title(
             self.title.as_ref(),
             self.custom_title.as_ref().map(|title| title.as_ref()),
-        )
+        );
+        if self.custom_title.is_some() {
+            return title;
+        }
+        match self.agent_cli.as_deref() {
+            Some("codex") => {
+                if let Some(session_prefix) = self.agent_cli_session_prefix.as_deref() {
+                    codex_thread_display_title(title.as_ref(), session_prefix)
+                } else {
+                    title
+                }
+            }
+            Some("claude") => claude_thread_display_title(title.as_ref()),
+            _ => title,
+        }
     }
 
     pub fn editable_title(&self) -> SharedString {
@@ -76,6 +92,37 @@ impl TerminalThreadMetadata {
             SharedString::from(terminal_title_without_prefix(self.title.as_ref()).to_string())
         })
     }
+}
+
+pub(crate) fn codex_thread_display_title(title: &str, session_prefix: &str) -> SharedString {
+    let title = terminal_title_without_prefix(title);
+    let title = match title.rsplit_once(" | ") {
+        Some((title, "Starting" | "Working" | "Thinking" | "Waiting" | "Ready")) => title,
+        _ => title,
+    };
+    let matches_session = |value: &str| {
+        value
+            .trim_end_matches(['.', '…'])
+            .starts_with(session_prefix)
+    };
+    if let Some((thread_title, session_id)) = title.rsplit_once(" | ")
+        && matches_session(session_id)
+    {
+        return SharedString::from(thread_title.to_string());
+    }
+    if matches_session(title) {
+        return SharedString::from("Codex");
+    }
+    SharedString::from(title.to_string())
+}
+
+/// Claude Code's own window title is always prefixed with a decorative
+/// marker (its idle "✳ " marker, or a busy spinner glyph while working --
+/// see `terminal_agent_status::classify`), which reads as clutter rather
+/// than status once shown as a thread title, so strip it the same way a
+/// spinner prefix is stripped elsewhere.
+pub(crate) fn claude_thread_display_title(title: &str) -> SharedString {
+    SharedString::from(terminal_title_without_prefix(title).to_string())
 }
 
 pub(crate) fn compose_terminal_thread_title(
@@ -157,11 +204,21 @@ pub fn terminal_title_prefix(title: &str) -> Option<&str> {
 pub struct TerminalThreadMetadataStore {
     db: TerminalThreadMetadataDb,
     terminals: HashMap<TerminalId, TerminalThreadMetadata>,
+    active_agent_programs: HashMap<TerminalId, String>,
+    active_agent_statuses: HashMap<TerminalId, TerminalAgentStatus>,
     terminals_by_paths: HashMap<PathList, HashSet<TerminalId>>,
     terminals_by_main_paths: HashMap<PathList, HashSet<TerminalId>>,
     reload_task: Option<Shared<Task<()>>>,
     pending_terminal_ops_tx: async_channel::Sender<DbOperation>,
     _db_operations_task: Task<()>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalAgentStatus {
+    Running,
+    Blocked,
+    Finished,
+    Idle,
 }
 
 #[derive(Debug, PartialEq)]
@@ -214,6 +271,63 @@ impl TerminalThreadMetadataStore {
 
     pub fn entries(&self) -> impl Iterator<Item = &TerminalThreadMetadata> + '_ {
         self.terminals.values()
+    }
+
+    pub fn active_agent_program(&self, terminal_id: TerminalId) -> Option<&str> {
+        self.active_agent_programs
+            .get(&terminal_id)
+            .map(String::as_str)
+    }
+
+    pub fn active_agent_status(&self, terminal_id: TerminalId) -> Option<TerminalAgentStatus> {
+        self.active_agent_statuses.get(&terminal_id).copied()
+    }
+
+    pub fn set_active_agent_status(
+        &mut self,
+        terminal_id: TerminalId,
+        status: Option<TerminalAgentStatus>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = match status {
+            Some(status) => self.active_agent_statuses.insert(terminal_id, status) != Some(status),
+            None => self.active_agent_statuses.remove(&terminal_id).is_some(),
+        };
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub fn mark_active_agent_status_seen(
+        &mut self,
+        terminal_id: TerminalId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_agent_statuses.get(&terminal_id) == Some(&TerminalAgentStatus::Finished) {
+            self.active_agent_statuses
+                .insert(terminal_id, TerminalAgentStatus::Idle);
+            cx.notify();
+        }
+    }
+
+    pub fn set_active_agent_program(
+        &mut self,
+        terminal_id: TerminalId,
+        program: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = match program {
+            Some(program) => {
+                self.active_agent_programs
+                    .insert(terminal_id, program.clone())
+                    .as_ref()
+                    != Some(&program)
+            }
+            None => self.active_agent_programs.remove(&terminal_id).is_some(),
+        };
+        if changed {
+            cx.notify();
+        }
     }
 
     pub fn reload_task(&self) -> Shared<Task<()>> {
@@ -380,6 +494,8 @@ impl TerminalThreadMetadataStore {
     }
 
     pub fn delete(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
+        self.active_agent_programs.remove(&terminal_id);
+        self.active_agent_statuses.remove(&terminal_id);
         if let Some(terminal) = self.terminals.remove(&terminal_id) {
             if let Some(ids) = self.terminals_by_paths.get_mut(terminal.folder_paths()) {
                 ids.remove(&terminal_id);
@@ -426,6 +542,8 @@ impl TerminalThreadMetadataStore {
         let mut this = Self {
             db,
             terminals: HashMap::default(),
+            active_agent_programs: HashMap::default(),
+            active_agent_statuses: HashMap::default(),
             terminals_by_paths: HashMap::default(),
             terminals_by_main_paths: HashMap::default(),
             reload_task: None,
@@ -462,6 +580,8 @@ impl TerminalThreadMetadataStore {
 
                 this.update(cx, |this, cx| {
                     this.terminals.clear();
+                    this.active_agent_programs.clear();
+                    this.active_agent_statuses.clear();
                     this.terminals_by_paths.clear();
                     this.terminals_by_main_paths.clear();
 
@@ -483,20 +603,26 @@ struct TerminalThreadMetadataDb(ThreadSafeConnection);
 impl Domain for TerminalThreadMetadataDb {
     const NAME: &str = stringify!(TerminalThreadMetadataDb);
 
-    const MIGRATIONS: &[&str] = &[sql!(
-        CREATE TABLE IF NOT EXISTS sidebar_terminal_threads(
-            terminal_id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            custom_title TEXT,
-            created_at TEXT NOT NULL,
-            working_directory TEXT,
-            folder_paths TEXT,
-            folder_paths_order TEXT,
-            main_worktree_paths TEXT,
-            main_worktree_paths_order TEXT,
-            remote_connection TEXT
-        ) STRICT;
-    )];
+    const MIGRATIONS: &[&str] = &[
+        sql!(
+            CREATE TABLE IF NOT EXISTS sidebar_terminal_threads(
+                terminal_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                custom_title TEXT,
+                created_at TEXT NOT NULL,
+                working_directory TEXT,
+                folder_paths TEXT,
+                folder_paths_order TEXT,
+                main_worktree_paths TEXT,
+                main_worktree_paths_order TEXT,
+                remote_connection TEXT
+            ) STRICT;
+        ),
+        sql!(
+            ALTER TABLE sidebar_terminal_threads ADD COLUMN agent_cli TEXT;
+            ALTER TABLE sidebar_terminal_threads ADD COLUMN agent_cli_session_prefix TEXT;
+        ),
+    ];
 }
 
 db::static_connection!(TerminalThreadMetadataDb, []);
@@ -506,7 +632,7 @@ impl TerminalThreadMetadataDb {
         self.select::<TerminalThreadMetadata>(
             "SELECT terminal_id, title, custom_title, created_at, \
             working_directory, folder_paths, folder_paths_order, main_worktree_paths, \
-            main_worktree_paths_order, remote_connection \
+            main_worktree_paths_order, remote_connection, agent_cli, agent_cli_session_prefix \
             FROM sidebar_terminal_threads \
             ORDER BY created_at DESC",
         )?()
@@ -540,10 +666,12 @@ impl TerminalThreadMetadataDb {
             .map(serde_json::to_string)
             .transpose()
             .context("serialize terminal thread remote connection")?;
+        let agent_cli = row.agent_cli;
+        let agent_cli_session_prefix = row.agent_cli_session_prefix;
 
         self.write(move |conn| {
-            let sql = "INSERT INTO sidebar_terminal_threads(terminal_id, title, custom_title, created_at, working_directory, folder_paths, folder_paths_order, main_worktree_paths, main_worktree_paths_order, remote_connection) \
-                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+            let sql = "INSERT INTO sidebar_terminal_threads(terminal_id, title, custom_title, created_at, working_directory, folder_paths, folder_paths_order, main_worktree_paths, main_worktree_paths_order, remote_connection, agent_cli, agent_cli_session_prefix) \
+                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
                        ON CONFLICT(terminal_id) DO UPDATE SET \
                            title = excluded.title, \
                            custom_title = excluded.custom_title, \
@@ -553,7 +681,9 @@ impl TerminalThreadMetadataDb {
                            folder_paths_order = excluded.folder_paths_order, \
                            main_worktree_paths = excluded.main_worktree_paths, \
                            main_worktree_paths_order = excluded.main_worktree_paths_order, \
-                           remote_connection = excluded.remote_connection";
+                           remote_connection = excluded.remote_connection, \
+                           agent_cli = excluded.agent_cli, \
+                           agent_cli_session_prefix = excluded.agent_cli_session_prefix";
             let mut stmt = Statement::prepare(conn, sql)?;
             let mut i = stmt.bind(&terminal_id, 1)?;
             i = stmt.bind(&title, i)?;
@@ -564,7 +694,9 @@ impl TerminalThreadMetadataDb {
             i = stmt.bind(&folder_paths_order, i)?;
             i = stmt.bind(&main_worktree_paths, i)?;
             i = stmt.bind(&main_worktree_paths_order, i)?;
-            stmt.bind(&remote_connection, i)?;
+            i = stmt.bind(&remote_connection, i)?;
+            i = stmt.bind(&agent_cli, i)?;
+            stmt.bind(&agent_cli_session_prefix, i)?;
             stmt.exec()
         })
         .await
@@ -599,6 +731,9 @@ impl Column for TerminalThreadMetadata {
         let (main_worktree_paths_order_str, next): (Option<String>, i32) =
             Column::column(statement, next)?;
         let (remote_connection_json, next): (Option<String>, i32) =
+            Column::column(statement, next)?;
+        let (agent_cli, next): (Option<String>, i32) = Column::column(statement, next)?;
+        let (agent_cli_session_prefix, next): (Option<String>, i32) =
             Column::column(statement, next)?;
 
         let folder_paths = folder_paths_str
@@ -639,6 +774,8 @@ impl Column for TerminalThreadMetadata {
                 worktree_paths,
                 remote_connection,
                 working_directory: working_directory.map(PathBuf::from),
+                agent_cli,
+                agent_cli_session_prefix,
             },
             next,
         ))
@@ -668,6 +805,8 @@ mod tests {
             worktree_paths,
             remote_connection: None,
             working_directory: None,
+            agent_cli: None,
+            agent_cli_session_prefix: None,
         }
     }
 
@@ -682,6 +821,64 @@ mod tests {
         assert_eq!(terminal_title_prefix(" Thinking"), None);
         assert_eq!(terminal_title_prefix("✳"), None);
         assert_eq!(terminal_title_prefix("v1 Running"), None);
+    }
+
+    #[test]
+    fn test_codex_thread_display_title_hides_session_id() {
+        assert_eq!(
+            codex_thread_display_title(
+                "⠸ Greet user | 01a0982f-4dfd-7f92-a721-81898... | Working",
+                "01a0982f-4dfd-7f92-a721-81898"
+            ),
+            "Greet user"
+        );
+        assert_eq!(
+            codex_thread_display_title(
+                "Greet user | 01a0982f-4dfd-7f92-a721-81898... | Working",
+                "01a0982f-4dfd-7f92-a721-81898"
+            ),
+            "Greet user"
+        );
+        assert_eq!(
+            codex_thread_display_title(
+                "Greet user | 01a0982f-4dfd-7f92-a721-81898...",
+                "01a0982f-4dfd-7f92-a721-81898",
+            ),
+            "Greet user"
+        );
+        assert_eq!(
+            codex_thread_display_title(
+                "01a0982f-4dfd-7f92-a721-81898...",
+                "01a0982f-4dfd-7f92-a721-81898",
+            ),
+            "Codex"
+        );
+    }
+
+    #[test]
+    fn test_claude_thread_display_title_strips_the_decorative_prefix() {
+        // Claude Code's window title is always prefixed with a decorative
+        // marker (its idle "✳" marker, or a busy spinner glyph), which reads
+        // as clutter rather than status once shown as a thread title.
+        assert_eq!(
+            claude_thread_display_title("✳ History of tea").as_ref(),
+            "History of tea"
+        );
+        assert_eq!(
+            claude_thread_display_title("◐ Claude Code").as_ref(),
+            "Claude Code"
+        );
+        assert_eq!(claude_thread_display_title("Claude").as_ref(), "Claude");
+    }
+
+    #[test]
+    fn test_claude_terminal_thread_display_title_strips_the_decorative_prefix() {
+        let mut metadata = metadata(
+            "✳ History of tea",
+            WorktreePaths::from_folder_paths(&PathList::default()),
+        );
+        metadata.agent_cli = Some("claude".to_string());
+        assert_eq!(metadata.display_title().as_ref(), "History of tea");
     }
 
     #[test]

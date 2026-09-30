@@ -9,7 +9,15 @@ Parallel Agents lets you run multiple agent threads and Terminal Threads at once
 
 Open the Threads Sidebar with {#kb multi_workspace::ToggleWorkspaceSidebar}.
 
-Use **Panel Layout > Agentic** from the user menu in the title bar (or the {#action workspace::UseAgenticLayout} action) to place the Agent Panel and Threads Sidebar on the left, with the Project Panel, Git Panel, and other panels on the right. Use **Panel Layout > Classic** (or {#action workspace::UseClassicLayout}) to restore the editor-oriented layout. You can still rearrange individual panels by right-clicking any panel icon.
+Agentic Layout is the default. Agent Mode shows the Threads Sidebar and Agent
+Panel. Editor Mode shows the Editor, Project Panel, Git Panel, and other normal
+panels. Switch between the modes with
+{#action workspace::ToggleAgentMode}.
+
+Use **Panel Layout > Classic** from the user menu in the title bar, or use
+{#action workspace::UseClassicLayout}, to show agent and editor surfaces in the
+same dock-based workspace. In Classic Layout, you can rearrange individual
+panels by right-clicking a panel icon.
 
 ## Threads Sidebar {#threads-sidebar}
 

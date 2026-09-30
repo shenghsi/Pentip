@@ -59,11 +59,13 @@ pub fn init(cx: &mut App) {
             workspace.register_action(TerminalPanel::open_terminal);
             workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
                 if is_enabled_in_workspace(workspace, cx) {
+                    workspace.enter_agentic_mode(workspace::AgenticMode::Editor, window, cx);
                     workspace.toggle_panel_focus::<TerminalPanel>(window, cx);
                 }
             });
             workspace.register_action(|workspace, _: &Toggle, window, cx| {
                 if is_enabled_in_workspace(workspace, cx) {
+                    workspace.enter_agentic_mode(workspace::AgenticMode::Editor, window, cx);
                     if !workspace.toggle_panel_focus::<TerminalPanel>(window, cx) {
                         workspace.close_panel::<TerminalPanel>(window, cx);
                     }
@@ -739,6 +741,7 @@ impl TerminalPanel {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
+        workspace.enter_agentic_mode(workspace::AgenticMode::Editor, window, cx);
         let center_pane = workspace.active_pane();
         let center_pane_has_focus = center_pane.focus_handle(cx).contains_focused(window, cx);
         let active_center_item_is_terminal = center_pane

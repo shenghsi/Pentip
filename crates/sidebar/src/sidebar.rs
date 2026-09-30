@@ -6,7 +6,7 @@ use agent::{ThreadStore, ZED_AGENT_ID};
 use agent_client_protocol::schema::v1 as acp;
 use agent_settings::{AgentSettings, THREADS_LIST_MAX_WIDTH, THREADS_LIST_MIN_WIDTH};
 use agent_ui::terminal_thread_metadata_store::{
-    TerminalThreadMetadata, TerminalThreadMetadataStore, terminal_title_prefix,
+    TerminalAgentStatus, TerminalThreadMetadata, TerminalThreadMetadataStore, terminal_title_prefix,
 };
 use agent_ui::thread_metadata_store::{
     ThreadMetadata, ThreadMetadataStore, WorktreePaths, worktree_info_from_thread_paths,
@@ -115,6 +115,15 @@ enum SerializedSidebarView {
 enum NewEntryTarget {
     LastCreatedKind,
     Terminal,
+    AgentCli(AgentCli),
+}
+
+#[derive(Clone, Copy)]
+enum AgentCli {
+    Codex,
+    Claude,
+    Pi,
+    Antigravity,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -369,6 +378,9 @@ struct ThreadEntry {
 #[derive(Clone)]
 struct TerminalEntry {
     metadata: TerminalThreadMetadata,
+    icon: IconName,
+    icon_color: Option<Color>,
+    status: AgentThreadStatus,
     workspace: ThreadEntryWorkspace,
     worktrees: Vec<ThreadItemWorktreeInfo>,
     has_notification: bool,
@@ -1158,6 +1170,15 @@ impl Sidebar {
                         this.close_terminal(metadata, &workspace, window, cx);
                     }
                 }
+                AgentPanelEvent::TerminalGracefulCloseReady { metadata } => {
+                    if let Err(error) = agent_ui::save_agy_session(metadata) {
+                        log::error!("Could not save Antigravity terminal history: {error:#}");
+                    }
+                    if let Some(workspace) = workspace.upgrade() {
+                        let workspace = ThreadEntryWorkspace::Open(workspace);
+                        this.close_terminal_impl(metadata, &workspace, false, window, cx);
+                    }
+                }
                 AgentPanelEvent::ThreadInteracted { thread_id } => {
                     this.record_thread_interacted(thread_id, cx);
                     this.schedule_update_entries(false, cx);
@@ -1365,6 +1386,9 @@ impl Sidebar {
             this.update_in(cx, |this, window, cx| match target {
                 NewEntryTarget::LastCreatedKind => this.create_new_entry(&workspace, window, cx),
                 NewEntryTarget::Terminal => this.create_new_terminal(&workspace, window, cx),
+                NewEntryTarget::AgentCli(agent_cli) => {
+                    this.create_new_agent_cli_terminal(&workspace, agent_cli, window, cx)
+                }
             })?;
             anyhow::Ok(())
         })
@@ -1502,13 +1526,48 @@ impl Sidebar {
             };
             let linked_worktree_path_lists =
                 linked_worktree_path_lists_for_workspaces(group_workspaces, cx);
+            let terminal_store = TerminalThreadMetadataStore::global(cx);
             let make_terminal_entry =
                 |metadata: TerminalThreadMetadata, workspace: ThreadEntryWorkspace| {
                     let worktrees =
                         worktree_info_from_thread_paths(&metadata.worktree_paths, &branch_by_path);
                     let has_notification =
                         live_notified_terminal_ids.contains(&metadata.terminal_id);
+                    let (active_agent_status, active_agent_program) = {
+                        let terminal_store = terminal_store.read(cx);
+                        (
+                            terminal_store.active_agent_status(metadata.terminal_id),
+                            terminal_store
+                                .active_agent_program(metadata.terminal_id)
+                                .map(|program| program.to_string()),
+                        )
+                    };
+                    let (status, icon_color) = match active_agent_status {
+                        Some(TerminalAgentStatus::Running) => (AgentThreadStatus::Running, None),
+                        Some(TerminalAgentStatus::Blocked) => {
+                            (AgentThreadStatus::WaitingForConfirmation, None)
+                        }
+                        Some(TerminalAgentStatus::Finished) => {
+                            (AgentThreadStatus::Completed, Some(Color::Warning))
+                        }
+                        Some(TerminalAgentStatus::Idle) | None => {
+                            (AgentThreadStatus::Completed, None)
+                        }
+                    };
                     TerminalEntry {
+                        icon: match active_agent_program
+                            .as_deref()
+                            .filter(|program| matches!(*program, "codex" | "claude" | "pi" | "agy"))
+                            .or(metadata.agent_cli.as_deref())
+                        {
+                            Some("codex") => IconName::AiOpenAi,
+                            Some("claude") => IconName::AiClaude,
+                            Some("pi") => IconName::AiPi,
+                            Some("agy") => IconName::AiAntigravity,
+                            _ => IconName::Terminal,
+                        },
+                        icon_color,
+                        status,
                         metadata,
                         workspace,
                         worktrees,
@@ -1518,7 +1577,6 @@ impl Sidebar {
                 };
 
             let mut terminals = Vec::new();
-            let terminal_store = TerminalThreadMetadataStore::global(cx);
             let group_host = group_key.host();
             let mut push_terminal_metadata =
                 |metadata: TerminalThreadMetadata, workspace: ThreadEntryWorkspace| {
@@ -2283,21 +2341,14 @@ impl Sidebar {
         &self,
         ix: usize,
         host: Option<&RemoteConnectionOptions>,
+        cx: &App,
     ) -> Option<AnyElement> {
-        let remote_icon_per_type = match host? {
-            RemoteConnectionOptions::Wsl(_) => IconName::Linux,
-            RemoteConnectionOptions::Docker(_) => IconName::Box,
-            _ => IconName::Server,
-        };
+        let icon = recent_projects::icon_for_remote_connection(Some(host?), cx);
 
         Some(
             div()
                 .id(format!("remote-project-icon-{}", ix))
-                .child(
-                    Icon::new(remote_icon_per_type)
-                        .size(IconSize::XSmall)
-                        .color(Color::Muted),
-                )
+                .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
                 .tooltip(Tooltip::text("Remote Project"))
                 .into_any_element(),
         )
@@ -2403,7 +2454,7 @@ impl Sidebar {
                     .gap_1()
                     .child(label)
                     .when_some(
-                        self.render_remote_project_icon(ix, host.as_ref()),
+                        self.render_remote_project_icon(ix, host.as_ref(), cx),
                         |this, icon| this.child(icon),
                     )
                     .when(is_collapsed, |this| {
@@ -2555,29 +2606,6 @@ impl Sidebar {
             .map(|mw| mw.read(cx).workspaces_for_project_group(key, cx))
             .unwrap_or_default();
 
-        if open_workspaces.is_empty() {
-            let key = key.clone();
-            return button
-                .tooltip(move |_, cx| {
-                    Tooltip::for_action_in("Start New Agent Thread", &NewThread, &focus_handle, cx)
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.set_group_expanded(&key, true, cx);
-                    this.selection = None;
-                    if let Some(workspace) = this.workspace_for_group(&key, cx) {
-                        this.create_new_entry(&workspace, window, cx);
-                    } else {
-                        this.open_workspace_and_create_entry(
-                            &key,
-                            NewEntryTarget::LastCreatedKind,
-                            window,
-                            cx,
-                        );
-                    }
-                }))
-                .into_any_element();
-        }
-
         let this = cx.weak_entity();
         let key = key.clone();
 
@@ -2617,7 +2645,9 @@ impl Sidebar {
                 window,
                 cx,
                 move |mut menu, _window, cx| {
-                    menu = menu.header("New Thread In…");
+                    if !open_workspaces.is_empty() {
+                        menu = menu.header("New Thread In…");
+                    }
 
                     for (workspace, labels) in open_workspaces
                         .iter()
@@ -2672,6 +2702,45 @@ impl Sidebar {
                         .filter(|workspace| open_workspaces.contains(workspace))
                         .cloned()
                         .or_else(|| open_workspaces.first().cloned());
+
+                    menu = menu
+                        .when(!open_workspaces.is_empty(), |menu| menu.separator())
+                        .header("Agent CLI");
+                    for (label, icon, agent_cli) in [
+                        ("Codex CLI", IconName::AiOpenAi, AgentCli::Codex),
+                        ("Claude CLI", IconName::AiClaude, AgentCli::Claude),
+                        ("Pi CLI", IconName::AiPi, AgentCli::Pi),
+                        (
+                            "Antigravity CLI",
+                            IconName::AiAntigravity,
+                            AgentCli::Antigravity,
+                        ),
+                    ] {
+                        let this = this.clone();
+                        let workspace = base_workspace.clone();
+                        let key = key.clone();
+                        menu = menu.item(ContextMenuEntry::new(label).icon(icon).handler(
+                            move |window, cx| {
+                                this.update(cx, |sidebar, cx| {
+                                    sidebar.set_group_expanded(&key, true, cx);
+                                    sidebar.selection = None;
+                                    if let Some(workspace) = workspace.as_ref() {
+                                        sidebar.create_new_agent_cli_terminal(
+                                            &workspace, agent_cli, window, cx,
+                                        );
+                                    } else {
+                                        sidebar.open_workspace_and_create_entry(
+                                            &key,
+                                            NewEntryTarget::AgentCli(agent_cli),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                })
+                                .ok();
+                            },
+                        ));
+                    }
 
                     // Only offer worktree creation when the base project can
                     // actually create one; otherwise the submenu would expand to
@@ -5044,6 +5113,28 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_terminal_impl(metadata, workspace, true, window, cx);
+    }
+
+    fn close_terminal_impl(
+        &mut self,
+        metadata: &TerminalThreadMetadata,
+        workspace: &ThreadEntryWorkspace,
+        allow_graceful_close: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if allow_graceful_close
+            && metadata.agent_cli.as_deref() == Some("agy")
+            && metadata.agent_cli_session_prefix.is_none()
+            && let ThreadEntryWorkspace::Open(workspace) = workspace
+            && let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx)
+            && panel.update(cx, |panel, cx| {
+                panel.begin_graceful_agy_close(metadata.terminal_id, cx)
+            })
+        {
+            return;
+        }
         if let ThreadEntryWorkspace::Closed {
             folder_paths,
             project_group_key,
@@ -5919,6 +6010,9 @@ impl Sidebar {
                     let timestamp: SharedString =
                         format_history_entry_timestamp(terminal.metadata.created_at).into();
                     Some(ThreadSwitcherEntry::Terminal(ThreadSwitcherTerminalEntry {
+                        icon: terminal.icon,
+                        icon_color: terminal.icon_color,
+                        status: terminal.status,
                         metadata: terminal.metadata.clone(),
                         workspace: terminal.workspace.clone(),
                         project_name: current_header_label.clone(),
@@ -6595,7 +6689,9 @@ impl Sidebar {
 
         let terminal_item = ThreadItem::new(id, title)
             .base_bg(sidebar_bg)
-            .icon(IconName::Terminal)
+            .icon(terminal.icon)
+            .when_some(terminal.icon_color, |this, color| this.icon_color(color))
+            .status(terminal.status)
             .when_some(icon_char, |this, icon_char| this.icon_char(icon_char))
             .is_remote(is_remote)
             .worktrees(worktrees)
@@ -7062,6 +7158,58 @@ impl Sidebar {
             if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                 panel.update(cx, |panel, cx| {
                     panel.new_terminal(Some(workspace), AgentThreadSource::Sidebar, window, cx);
+                });
+            }
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+    }
+
+    fn create_new_agent_cli_terminal(
+        &mut self,
+        workspace: &Entity<Workspace>,
+        agent_cli: AgentCli,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if workspace_path_list(workspace, cx).paths().is_empty() {
+            return;
+        }
+
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return;
+        };
+
+        multi_workspace.update(cx, |multi_workspace, cx| {
+            multi_workspace.activate(workspace.clone(), None, window, cx);
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                panel.update(cx, |panel, cx| match agent_cli {
+                    AgentCli::Codex => panel.new_codex_terminal(
+                        Some(workspace),
+                        AgentThreadSource::Sidebar,
+                        window,
+                        cx,
+                    ),
+                    AgentCli::Claude => panel.new_claude_terminal(
+                        Some(workspace),
+                        AgentThreadSource::Sidebar,
+                        window,
+                        cx,
+                    ),
+                    AgentCli::Pi => panel.new_pi_terminal(
+                        Some(workspace),
+                        AgentThreadSource::Sidebar,
+                        window,
+                        cx,
+                    ),
+                    AgentCli::Antigravity => panel.new_agy_terminal(
+                        Some(workspace),
+                        AgentThreadSource::Sidebar,
+                        window,
+                        cx,
+                    ),
                 });
             }
             workspace.focus_panel::<AgentPanel>(window, cx);
@@ -7706,6 +7854,163 @@ impl Sidebar {
                 }
                 ThreadsArchiveViewEvent::Activate { thread } => {
                     this.open_thread_from_archive(thread.clone(), window, cx);
+                }
+                ThreadsArchiveViewEvent::ActivateCodex {
+                    session_id,
+                    title,
+                    working_directory,
+                    created_at,
+                } => {
+                    let Some(workspace) = this.active_workspace(cx) else {
+                        return;
+                    };
+                    let session_uuid = *session_id;
+                    let session_id = session_uuid.to_string();
+                    let remote_connection = workspace
+                        .read(cx)
+                        .project()
+                        .read(cx)
+                        .remote_connection_options(cx);
+                    let existing = TerminalThreadMetadataStore::global(cx)
+                        .read(cx)
+                        .entries()
+                        .find(|metadata| {
+                            remote::same_remote_connection_identity(
+                                metadata.remote_connection.as_ref(),
+                                remote_connection.as_ref(),
+                            ) && metadata.agent_cli.as_deref() == Some("codex")
+                                && metadata
+                                    .agent_cli_session_prefix
+                                    .as_deref()
+                                    .is_some_and(|prefix| session_id.starts_with(prefix))
+                        })
+                        .cloned();
+                    let metadata = existing.unwrap_or_else(|| TerminalThreadMetadata {
+                        terminal_id: agent_ui::TerminalId::from_session_id(session_uuid),
+                        title: title.clone().into(),
+                        custom_title: Some(title.clone().into()),
+                        created_at: *created_at,
+                        worktree_paths: workspace.read(cx).project().read(cx).worktree_paths(cx),
+                        remote_connection: remote_connection.clone(),
+                        working_directory: Some(working_directory.clone()),
+                        agent_cli: Some("codex".into()),
+                        agent_cli_session_prefix: Some(session_id),
+                    });
+                    let workspace = this
+                        .find_current_workspace_for_path_list(
+                            metadata.folder_paths(),
+                            remote_connection.as_ref(),
+                            cx,
+                        )
+                        .unwrap_or(workspace);
+                    this.show_thread_list(window, cx);
+                    this.activate_terminal_entry(
+                        metadata,
+                        ThreadEntryWorkspace::Open(workspace),
+                        true,
+                        window,
+                        cx,
+                    );
+                }
+                ThreadsArchiveViewEvent::ActivateClaude {
+                    session_id,
+                    title,
+                    working_directory,
+                    updated_at,
+                } => {
+                    let Some(workspace) = this.active_workspace(cx) else {
+                        return;
+                    };
+                    let session_uuid = *session_id;
+                    let session_id = session_uuid.to_string();
+                    let remote_connection = workspace
+                        .read(cx)
+                        .project()
+                        .read(cx)
+                        .remote_connection_options(cx);
+                    let existing = TerminalThreadMetadataStore::global(cx)
+                        .read(cx)
+                        .entries()
+                        .find(|metadata| {
+                            remote::same_remote_connection_identity(
+                                metadata.remote_connection.as_ref(),
+                                remote_connection.as_ref(),
+                            ) && metadata.agent_cli.as_deref() == Some("claude")
+                                && metadata.agent_cli_session_prefix.as_deref()
+                                    == Some(session_id.as_str())
+                        })
+                        .cloned();
+                    let metadata = existing.unwrap_or_else(|| TerminalThreadMetadata {
+                        terminal_id: agent_ui::TerminalId::from_session_id(session_uuid),
+                        title: title.clone().into(),
+                        custom_title: Some(title.clone().into()),
+                        created_at: *updated_at,
+                        worktree_paths: workspace.read(cx).project().read(cx).worktree_paths(cx),
+                        remote_connection: remote_connection.clone(),
+                        working_directory: Some(working_directory.clone()),
+                        agent_cli: Some("claude".into()),
+                        agent_cli_session_prefix: Some(session_id),
+                    });
+                    let workspace = this
+                        .find_current_workspace_for_path_list(
+                            metadata.folder_paths(),
+                            remote_connection.as_ref(),
+                            cx,
+                        )
+                        .unwrap_or(workspace);
+                    this.show_thread_list(window, cx);
+                    this.activate_terminal_entry(
+                        metadata,
+                        ThreadEntryWorkspace::Open(workspace),
+                        true,
+                        window,
+                        cx,
+                    );
+                }
+                ThreadsArchiveViewEvent::ActivateCli {
+                    program,
+                    session_id,
+                    title,
+                    working_directory,
+                    updated_at,
+                } => {
+                    let Some(workspace) = this.active_workspace(cx) else {
+                        return;
+                    };
+                    let session_uuid = *session_id;
+                    let session_id = session_uuid.to_string();
+                    let existing = TerminalThreadMetadataStore::global(cx)
+                        .read(cx)
+                        .entries()
+                        .find(|metadata| {
+                            metadata.remote_connection.is_none()
+                                && metadata.agent_cli.as_deref() == Some(program.as_str())
+                                && metadata.agent_cli_session_prefix.as_deref()
+                                    == Some(session_id.as_str())
+                        })
+                        .cloned();
+                    let metadata = existing.unwrap_or_else(|| TerminalThreadMetadata {
+                        terminal_id: agent_ui::TerminalId::from_session_id(session_uuid),
+                        title: title.clone().into(),
+                        custom_title: Some(title.clone().into()),
+                        created_at: *updated_at,
+                        worktree_paths: workspace.read(cx).project().read(cx).worktree_paths(cx),
+                        remote_connection: None,
+                        working_directory: Some(working_directory.clone()),
+                        agent_cli: Some(program.clone()),
+                        agent_cli_session_prefix: Some(session_id),
+                    });
+                    let workspace = this
+                        .find_current_workspace_for_path_list(metadata.folder_paths(), None, cx)
+                        .unwrap_or(workspace);
+                    this.show_thread_list(window, cx);
+                    this.activate_terminal_entry(
+                        metadata,
+                        ThreadEntryWorkspace::Open(workspace),
+                        true,
+                        window,
+                        cx,
+                    );
                 }
                 ThreadsArchiveViewEvent::CancelRestore { thread_id } => {
                     this.restoring_tasks.remove(thread_id);

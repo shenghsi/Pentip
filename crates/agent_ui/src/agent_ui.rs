@@ -24,6 +24,7 @@ mod mode_selector;
 mod model_selector;
 mod model_selector_popover;
 mod profile_selector;
+mod terminal_agent_status;
 mod terminal_codegen;
 mod terminal_inline_assistant;
 pub mod terminal_thread_metadata_store;
@@ -33,6 +34,10 @@ mod thread_import;
 pub mod thread_metadata_store;
 pub mod thread_worktree_archive;
 
+mod claude_thread_history;
+mod cli_thread_history;
+pub use cli_thread_history::save_agy_session;
+mod codex_thread_history;
 pub mod threads_archive_view;
 mod ui;
 mod unicode_confusables;
@@ -326,6 +331,14 @@ actions!(
         ImportThreadsFromOtherChannels,
         /// Starts a new terminal thread.
         NewTerminalThread,
+        /// Starts a new Codex CLI terminal thread.
+        NewCodexTerminalThread,
+        /// Starts a new Claude CLI terminal thread.
+        NewClaudeTerminalThread,
+        /// Starts a new Pi CLI terminal thread.
+        NewPiTerminalThread,
+        /// Starts a new Antigravity CLI terminal thread.
+        NewAgyTerminalThread,
     ]
 );
 
