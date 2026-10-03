@@ -224,6 +224,10 @@
       "ctrl-shift-e": "project_panel::ToggleFocus",
       "ctrl-tab": "agents_sidebar::ToggleThreadSwitcher",
       "ctrl-shift-tab": ["agents_sidebar::ToggleThreadSwitcher", { "select_last": true }],
+      "ctrl-k up": "pane::SplitUp",
+      "ctrl-k down": "pane::SplitDown",
+      "ctrl-k left": "pane::SplitLeft",
+      "ctrl-k right": "pane::SplitRight",
     },
   },
   {

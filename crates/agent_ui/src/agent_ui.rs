@@ -2,6 +2,7 @@ mod agent_configuration;
 pub mod agent_connection_store;
 mod agent_diff;
 mod agent_model_selector;
+mod agent_pane_layout;
 mod agent_panel;
 mod agent_registry_ui;
 mod buffer_codegen;
@@ -284,6 +285,8 @@ actions!(
         RemoveSelectedThread,
         /// Renames the currently selected thread.
         RenameSelectedThread,
+        /// Closes the active pane of the agent panel. The entry in the pane stays open.
+        ClosePane,
         /// Starts a chat conversation with follow-up enabled.
         ChatWithFollow,
         /// Cycles to the next inline assist suggestion.
