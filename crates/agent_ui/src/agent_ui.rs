@@ -1,5 +1,6 @@
 mod agent_configuration;
 pub mod agent_connection_store;
+mod agent_control;
 mod agent_diff;
 mod agent_model_selector;
 mod agent_pane_layout;
@@ -652,6 +653,9 @@ pub fn init(
 ) {
     RemoteAgentRoutingSettings::register(cx);
     agent::ThreadStore::init_global(cx);
+    if !is_eval {
+        agent_control::init(cx);
+    }
     prompt_store::init(cx);
 
     cx.set_global(agent_skills::SkillsUpdatedHook(std::rc::Rc::new(|cx| {

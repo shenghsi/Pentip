@@ -397,6 +397,27 @@ pub fn get_zed_cli_path() -> Result<PathBuf> {
         })
 }
 
+/// Returns a path for the `pentipctl` executable, mirroring
+/// `get_zed_cli_path` above.
+#[cfg(unix)]
+pub fn get_pentipctl_path() -> Result<PathBuf> {
+    use anyhow::Context as _;
+    let zed_path =
+        std::env::current_exe().context("Failed to determine current zed executable path.")?;
+    let parent = zed_path
+        .parent()
+        .context("Failed to determine parent directory of zed executable path.")?;
+
+    // The installed layouts (libexec on Linux, Contents/MacOS on macOS) and
+    // the development target directory all put pentipctl beside zed.
+    parent
+        .join("pentipctl")
+        .canonicalize()
+        .ok()
+        .filter(|path| path != &zed_path)
+        .context("could not find pentipctl beside the zed executable")
+}
+
 #[cfg(unix)]
 pub async fn load_login_shell_environment() -> Result<()> {
     use anyhow::Context as _;

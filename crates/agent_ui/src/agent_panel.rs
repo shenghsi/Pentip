@@ -1278,6 +1278,14 @@ impl From<AgentThread> for BaseView {
     }
 }
 
+pub(crate) struct AgentControlTerminal {
+    pub id: TerminalId,
+    pub terminal: Entity<terminal::Terminal>,
+    pub title: String,
+    pub agent: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
 /// A pane of the agent panel that is not the active pane. The active pane
 /// keeps its entry in `AgentPanel::base_view`.
 struct BackgroundAgentPane {
@@ -1321,6 +1329,7 @@ pub struct AgentPanel {
     pane_layout: AgentPaneLayout,
     active_pane: AgentPaneId,
     background_panes: HashMap<AgentPaneId, BackgroundAgentPane>,
+    pending_pane_terminals: HashMap<TerminalId, AgentPaneId>,
     last_created_entry_kind: AgentPanelEntryKind,
     draft_thread: Option<Entity<ConversationView>>,
     retained_threads: HashMap<ThreadId, Entity<ConversationView>>,
@@ -1841,7 +1850,7 @@ impl AgentPanel {
         })
     }
 
-    pub(crate) fn new(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let fs = workspace.app_state().fs.clone();
         let user_store = workspace.app_state().user_store.clone();
         let project = workspace.project();
@@ -1859,6 +1868,7 @@ impl AgentPanel {
         let (pane_layout, active_pane) = AgentPaneLayout::new();
 
         let weak_panel = cx.entity().downgrade();
+        crate::agent_control::register_panel(weak_panel.clone(), window.window_handle(), cx);
         let onboarding = cx.new(|cx| {
             AgentPanelOnboarding::new(
                 user_store.clone(),
@@ -1921,6 +1931,7 @@ impl AgentPanel {
             pane_layout,
             active_pane,
             background_panes: HashMap::default(),
+            pending_pane_terminals: HashMap::default(),
             last_created_entry_kind: AgentPanelEntryKind::Thread,
             workspace,
             user_store,
@@ -2988,7 +2999,9 @@ impl AgentPanel {
         self.report_terminal_program(terminal_id, source, cx);
         self.persist_terminal_metadata(terminal_id, cx);
         self.emit_terminal_thread_started(terminal_id, source, cx);
-        if select {
+        if let Some(pane) = self.pending_pane_terminals.remove(&terminal_id) {
+            self.show_terminal_in_pane(pane, terminal_id, focus, window, cx);
+        } else if select {
             self.set_base_view(BaseView::Terminal { terminal_id }, focus, window, cx);
         }
         cx.emit(AgentPanelEvent::EntryChanged);
@@ -5493,6 +5506,158 @@ impl AgentPanel {
         cx.emit(AgentPanelEvent::ActiveViewChanged);
         cx.notify();
         Some(new_pane)
+    }
+
+    fn pane_showing_terminal(&self, terminal_id: TerminalId, cx: &App) -> Option<AgentPaneId> {
+        if self.active_terminal_id() == Some(terminal_id) {
+            Some(self.active_pane)
+        } else {
+            self.background_pane_showing(&BaseView::Terminal { terminal_id }, cx)
+        }
+    }
+
+    fn show_terminal_in_pane(
+        &mut self,
+        pane: AgentPaneId,
+        terminal_id: TerminalId,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if pane == self.active_pane {
+            self.set_base_view(BaseView::Terminal { terminal_id }, focus, window, cx);
+            return;
+        }
+        if self.background_panes.remove(&pane).is_none() {
+            return;
+        }
+        self.park_view_in_pane(pane, BaseView::Terminal { terminal_id }, window, cx);
+        if focus {
+            self.activate_pane(pane, true, window, cx);
+        }
+    }
+
+    pub(crate) fn control_terminals(&self, cx: &App) -> Vec<AgentControlTerminal> {
+        let mut terminals = self
+            .terminals
+            .iter()
+            .map(|(id, terminal)| AgentControlTerminal {
+                id: *id,
+                terminal: terminal.view.read(cx).terminal().clone(),
+                title: terminal.title(cx).to_string(),
+                agent: terminal.agent_cli.clone(),
+                created_at: terminal.created_at,
+            })
+            .collect::<Vec<_>>();
+        terminals.sort_by_key(|terminal| terminal.created_at);
+        terminals
+    }
+
+    /// Starts a shell terminal for an agent control request. Without
+    /// `focus`, no pane shows the new terminal.
+    pub(crate) fn control_open_terminal(
+        &mut self,
+        working_directory: Option<PathBuf>,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<TerminalId> {
+        anyhow::ensure!(
+            self.supports_terminal(cx),
+            "the project does not support terminals"
+        );
+        let terminal_id = TerminalId::new();
+        let working_directory =
+            working_directory.or_else(|| self.terminal_working_directory(None, cx));
+        self.spawn_terminal(
+            terminal_id,
+            working_directory,
+            None,
+            None,
+            None,
+            focus,
+            focus,
+            true,
+            None,
+            None,
+            None,
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        Ok(terminal_id)
+    }
+
+    /// Adds a pane adjacent to the pane that shows `target` and starts a
+    /// shell terminal in it, for an agent control request.
+    pub(crate) fn control_split_terminal(
+        &mut self,
+        target: TerminalId,
+        direction: SplitDirection,
+        working_directory: Option<PathBuf>,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<TerminalId> {
+        anyhow::ensure!(
+            self.supports_terminal(cx),
+            "the project does not support terminals"
+        );
+        let target_pane = self
+            .pane_showing_terminal(target, cx)
+            .context("no pane shows the selected terminal")?;
+        let new_pane = self
+            .pane_layout
+            .split(target_pane, direction)
+            .context("the pane of the selected terminal closed")?;
+        self.background_panes.insert(
+            new_pane,
+            BackgroundAgentPane {
+                view: BaseView::Uninitialized,
+                _focus_subscription: None,
+            },
+        );
+        let terminal_id = TerminalId::new();
+        self.pending_pane_terminals.insert(terminal_id, new_pane);
+        let working_directory =
+            working_directory.or_else(|| self.terminal_working_directory(None, cx));
+        self.spawn_terminal(
+            terminal_id,
+            working_directory,
+            None,
+            None,
+            None,
+            false,
+            focus,
+            true,
+            None,
+            None,
+            None,
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        cx.notify();
+        Ok(terminal_id)
+    }
+
+    /// Removes the pane that was reserved for a terminal that did not start.
+    pub(crate) fn control_abandon_terminal(
+        &mut self,
+        terminal_id: TerminalId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self.pending_pane_terminals.remove(&terminal_id) else {
+            return;
+        };
+        let is_empty = self
+            .background_panes
+            .get(&pane)
+            .is_some_and(|background| matches!(background.view, BaseView::Uninitialized));
+        if is_empty {
+            self.close_pane(pane, window, cx);
+        }
     }
 
     /// Removes `pane` from the layout. The entry of the pane stays open.
@@ -9621,6 +9786,60 @@ mod tests {
                 panel.has_terminal(second_terminal),
                 "a closed pane must not close its terminal"
             );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_terminal_shows_in_a_background_pane_without_focus(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            let first_terminal = panel
+                .insert_test_terminal("first", true, window, cx)
+                .expect("failed to insert the first terminal");
+            let first_pane = panel.active_pane;
+            let second_terminal = panel
+                .insert_test_terminal("second", false, window, cx)
+                .expect("failed to insert the second terminal");
+            assert_eq!(panel.pane_showing_terminal(second_terminal, cx), None);
+
+            let second_pane = panel
+                .pane_layout
+                .split(first_pane, SplitDirection::Right)
+                .expect("failed to split the pane");
+            panel.background_panes.insert(
+                second_pane,
+                BackgroundAgentPane {
+                    view: BaseView::Uninitialized,
+                    _focus_subscription: None,
+                },
+            );
+            panel.show_terminal_in_pane(second_pane, second_terminal, false, window, cx);
+
+            assert_eq!(panel.active_pane, first_pane);
+            assert_eq!(panel.active_terminal_id(), Some(first_terminal));
+            assert_eq!(
+                panel.pane_showing_terminal(second_terminal, cx),
+                Some(second_pane)
+            );
+
+            let third_pane = panel
+                .pane_layout
+                .split(second_pane, SplitDirection::Down)
+                .expect("failed to split the pane");
+            panel.background_panes.insert(
+                third_pane,
+                BackgroundAgentPane {
+                    view: BaseView::Uninitialized,
+                    _focus_subscription: None,
+                },
+            );
+            let abandoned_terminal = TerminalId::new();
+            panel
+                .pending_pane_terminals
+                .insert(abandoned_terminal, third_pane);
+            panel.control_abandon_terminal(abandoned_terminal, window, cx);
+            assert_eq!(panel.pane_layout.panes(), vec![first_pane, second_pane]);
         });
     }
 
