@@ -5555,6 +5555,10 @@ impl AgentPanel {
 
     /// Starts a shell terminal for an agent control request. Without
     /// `focus`, no pane shows the new terminal.
+    pub(crate) fn is_local_project(&self, cx: &App) -> bool {
+        self.project.read(cx).is_local()
+    }
+
     pub(crate) fn control_open_terminal(
         &mut self,
         working_directory: Option<PathBuf>,

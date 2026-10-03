@@ -467,6 +467,20 @@ mod server {
         Ok(terminal)
     }
 
+    /// Terminal control reaches only terminals of the local machine. A remote
+    /// project's terminal runs its shell on the remote host, where this
+    /// server and its working-directory checks do not apply.
+    fn ensure_local_project(caller: &Caller, cx: &AsyncApp) -> Result<(), Box<ControlResponse>> {
+        let is_local = cx.update(|cx| caller.panel.read(cx).is_local_project(cx));
+        if is_local {
+            return Ok(());
+        }
+        Err(Box::new(ControlResponse::error(
+            ControlErrorCode::RemoteControlUnavailable,
+            "agent control is not supported for remote projects",
+        )))
+    }
+
     fn validate_working_directory(cwd: Option<&Path>) -> Result<(), Box<ControlResponse>> {
         if let Some(cwd) = cwd
             && (!cwd.is_absolute() || !cwd.is_dir())
@@ -491,6 +505,9 @@ mod server {
         request: &TerminalOpenRequest,
         cx: &mut AsyncApp,
     ) -> ControlResponse {
+        if let Err(response) = ensure_local_project(caller, cx) {
+            return *response;
+        }
         if let Err(response) = validate_working_directory(request.cwd.as_deref()) {
             return *response;
         }
@@ -528,6 +545,9 @@ mod server {
                 );
             }
         };
+        if let Err(response) = ensure_local_project(caller, cx) {
+            return *response;
+        }
         if let Err(response) = validate_working_directory(request.cwd.as_deref()) {
             return *response;
         }

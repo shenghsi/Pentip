@@ -490,6 +490,7 @@ fn error_code_name(code: agent_control_protocol::ControlErrorCode) -> &'static s
         ControlErrorCode::InvalidSplitDirection => "invalid-split-direction",
         ControlErrorCode::InvalidPlacement => "invalid-placement",
         ControlErrorCode::TerminalCreateFailed => "terminal-create-failed",
+        ControlErrorCode::RemoteControlUnavailable => "remote-control-unavailable",
         ControlErrorCode::TerminalPlacementFailed => "terminal-placement-failed",
         ControlErrorCode::CursorExpired => "cursor-expired",
         ControlErrorCode::Timeout => "timeout",
