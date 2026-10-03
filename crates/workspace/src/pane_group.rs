@@ -1136,7 +1136,7 @@ impl SplitDirection {
     }
 }
 
-mod element {
+pub mod element {
     use std::mem;
     use std::{cell::RefCell, iter, rc::Rc, sync::Arc};
 
@@ -1160,7 +1160,7 @@ mod element {
 
     const DIVIDER_SIZE: f32 = 1.0;
 
-    pub(super) fn pane_axis(
+    pub fn pane_axis(
         axis: Axis,
         basis: usize,
         flexes: Arc<Mutex<Vec<f32>>>,

@@ -6,6 +6,8 @@ members = [
     "crates/action_log",
     "crates/activity_indicator",
     "crates/agent",
+    "crates/agent_control_cli",
+    "crates/agent_control_protocol",
     "crates/agent_servers",
     "crates/agent_settings",
     "crates/agent_skills",
@@ -282,6 +284,8 @@ acp_tools = { path = "crates/acp_tools" }
 action_log = { path = "crates/action_log" }
 activity_indicator = { path = "crates/activity_indicator" }
 agent = { path = "crates/agent" }
+agent_control_cli = { path = "crates/agent_control_cli" }
+agent_control_protocol = { path = "crates/agent_control_protocol" }
 agent_servers = { path = "crates/agent_servers" }
 agent_settings = { path = "crates/agent_settings" }
 agent_skills = { path = "crates/agent_skills" }

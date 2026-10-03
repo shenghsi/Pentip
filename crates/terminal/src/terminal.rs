@@ -66,12 +66,12 @@ use crate::alacritty::{
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
     append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
     display_only_term_config, find_from_terminal_point, full_content_range, last_non_empty_lines,
-    make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
-    scroll_display, scroll_to_point, search_matches, selection_text, set_default_cursor_style,
-    set_selection as set_term_selection, shrink_to_used, spawn_event_loop,
-    toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
-    update_selection_to_vi_cursor, update_vi_cursor_for_scroll, used_lines, vi_goto_point,
-    vi_motion,
+    last_physical_lines, make_content, new_term, open_pty, pty_options, pty_term_config, resize,
+    screen_lines, scroll_display, scroll_to_point, search_matches, selection_text,
+    set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
+    spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
+    update_selection as update_term_selection, update_selection_to_vi_cursor,
+    update_vi_cursor_for_scroll, used_lines, vi_goto_point, vi_motion, visible_physical_lines,
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
@@ -512,6 +512,70 @@ pub enum GridLinesChange {
     #[default]
     Unchanged,
     Changed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlSnapshotSource {
+    Visible,
+    Recent,
+    RecentUnwrapped,
+    Detection,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlSnapshot {
+    pub text: String,
+    pub alternate_screen: bool,
+    pub cursor: ControlReadCursor,
+}
+
+/// An opaque position in a terminal's output stream: the trailing text of a
+/// prior read. Treat as opaque -- see `Terminal::control_snapshot_since`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlReadCursor {
+    pub anchor: String,
+}
+
+/// Returned by `control_snapshot_since` when `since` is older than what the
+/// terminal still retains (its scrollback evicted the relevant lines, or it
+/// switched between the primary and alternate screen) -- the cursor can no
+/// longer prove no output was missed, so the caller must fall back to a
+/// plain `control_snapshot` read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControlReadCursorExpired;
+
+/// How much trailing text a `ControlReadCursor` carries as its anchor.
+/// Larger makes an accidental duplicate match (see `control_snapshot_since`)
+/// less likely; it does not affect correctness, only how often an
+/// already-seen line gets harmlessly re-included.
+const CONTROL_READ_ANCHOR_BYTES: usize = 256;
+
+fn control_read_anchor(text: &str) -> String {
+    if text.len() <= CONTROL_READ_ANCHOR_BYTES {
+        return text.to_string();
+    }
+    let mut start = text.len() - CONTROL_READ_ANCHOR_BYTES;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_string()
+}
+
+/// Joins at most `max_lines` of `text`'s leading `\n`-separated lines, capped
+/// to `max_bytes`, whichever binds first. Only ever includes whole lines.
+fn cap_lines_and_bytes(text: &str, max_lines: usize, max_bytes: usize) -> String {
+    let mut result = String::new();
+    for line in text.split('\n').take(max_lines) {
+        let needed = line.len() + usize::from(!result.is_empty());
+        if result.len() + needed > max_bytes {
+            break;
+        }
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(line);
+    }
+    result
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -2443,6 +2507,85 @@ impl Terminal {
     pub fn last_n_non_empty_lines(&self, n: usize) -> Vec<String> {
         let terminal = self.term.lock_unfair();
         last_non_empty_lines(&terminal, n)
+    }
+
+    pub fn has_exited(&self) -> bool {
+        self.child_exited.is_some()
+    }
+
+    pub fn control_snapshot(&self, source: ControlSnapshotSource, lines: usize) -> ControlSnapshot {
+        let terminal = self.term.lock_unfair();
+        let lines = match source {
+            ControlSnapshotSource::Visible => visible_physical_lines(&terminal, lines),
+            ControlSnapshotSource::Recent => last_physical_lines(&terminal, lines),
+            ControlSnapshotSource::RecentUnwrapped => last_non_empty_lines(&terminal, lines),
+            // Ignores the requested `lines`: always the terminal's current
+            // row count, so this snapshot means the same thing regardless
+            // of what a caller happened to ask for.
+            ControlSnapshotSource::Detection => {
+                last_physical_lines(&terminal, screen_lines(&terminal))
+            }
+        };
+        let text = lines.join("\n");
+        ControlSnapshot {
+            cursor: ControlReadCursor {
+                anchor: control_read_anchor(&text),
+            },
+            text,
+            alternate_screen: self.last_content.mode.contains(Modes::ALT_SCREEN),
+        }
+    }
+
+    /// Reads only the output appended after `since`, instead of a bounded
+    /// snapshot of the tail. `since.anchor` is matched against a fresh read
+    /// of up to `search_window_lines` physical lines; everything after its
+    /// first (leftmost) occurrence is "new". Matching leftmost rather than
+    /// the most recent occurrence means an accidental earlier duplicate of
+    /// the anchor text can only cause a little already-seen content to be
+    /// re-included, never cause genuinely new content to be skipped. If the
+    /// anchor isn't found at all -- it scrolled out of the search window,
+    /// or the terminal switched between its primary and alternate screen --
+    /// the caller can no longer be proven caught up, so this returns
+    /// `ControlReadCursorExpired` rather than guessing.
+    ///
+    /// Returns at most `max_lines` lines and `max_bytes` bytes of text; the
+    /// returned cursor always matches exactly what's in `text`, so a caller
+    /// that gets a capped response can simply call this again with the new
+    /// cursor to keep catching up without skipping anything.
+    pub fn control_snapshot_since(
+        &self,
+        since: ControlReadCursor,
+        max_lines: usize,
+        max_bytes: usize,
+        search_window_lines: usize,
+    ) -> Result<ControlSnapshot, ControlReadCursorExpired> {
+        let terminal = self.term.lock_unfair();
+        let window = last_physical_lines(&terminal, search_window_lines).join("\n");
+        let alternate_screen = self.last_content.mode.contains(Modes::ALT_SCREEN);
+        drop(terminal);
+
+        let start = if since.anchor.is_empty() {
+            0
+        } else {
+            match window.find(&since.anchor) {
+                Some(position) => position + since.anchor.len(),
+                None => return Err(ControlReadCursorExpired),
+            }
+        };
+        let available = window[start..]
+            .strip_prefix('\n')
+            .unwrap_or(&window[start..]);
+        let text = cap_lines_and_bytes(available, max_lines, max_bytes);
+        let anchor = if text.is_empty() {
+            since.anchor
+        } else {
+            control_read_anchor(&text)
+        };
+        Ok(ControlSnapshot {
+            text,
+            alternate_screen,
+            cursor: ControlReadCursor { anchor },
+        })
     }
 
     pub fn focus_in(&self) {

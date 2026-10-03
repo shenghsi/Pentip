@@ -1,7 +1,9 @@
 mod agent_configuration;
 pub mod agent_connection_store;
+mod agent_control;
 mod agent_diff;
 mod agent_model_selector;
+mod agent_pane_layout;
 mod agent_panel;
 mod agent_registry_ui;
 mod buffer_codegen;
@@ -284,6 +286,8 @@ actions!(
         RemoveSelectedThread,
         /// Renames the currently selected thread.
         RenameSelectedThread,
+        /// Closes the active pane of the agent panel. The entry in the pane stays open.
+        ClosePane,
         /// Starts a chat conversation with follow-up enabled.
         ChatWithFollow,
         /// Cycles to the next inline assist suggestion.
@@ -649,6 +653,9 @@ pub fn init(
 ) {
     RemoteAgentRoutingSettings::register(cx);
     agent::ThreadStore::init_global(cx);
+    if !is_eval {
+        agent_control::init(cx);
+    }
     prompt_store::init(cx);
 
     cx.set_global(agent_skills::SkillsUpdatedHook(std::rc::Rc::new(|cx| {

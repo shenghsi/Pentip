@@ -30,6 +30,7 @@ acp_thread.workspace = true
 action_log.workspace = true
 agent-client-protocol.workspace = true
 agent.workspace = true
+agent_control_protocol.workspace = true
 async-channel.workspace = true
 async-lock.workspace = true
 agent_servers.workspace = true
@@ -82,6 +83,7 @@ ordered-float.workspace = true
 parking_lot.workspace = true
 sha2.workspace = true
 smol.workspace = true
+sysinfo.workspace = true
 paths.workspace = true
 picker.workspace = true
 platform_title_bar.workspace = true
@@ -90,6 +92,7 @@ project.workspace = true
 prompt_store.workspace = true
 proto.workspace = true
 rand.workspace = true
+regex.workspace = true
 release_channel.workspace = true
 remote.workspace = true
 remote_connection.workspace = true
@@ -121,6 +124,9 @@ git_ui_core.workspace = true
 zed_actions.workspace = true
 image.workspace = true
 reqwest_client = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["socket"] }
 
 [dev-dependencies]
 acp_thread = { workspace = true, features = ["test-support"] }
