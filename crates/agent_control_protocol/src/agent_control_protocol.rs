@@ -403,6 +403,7 @@ pub enum ControlErrorCode {
     Timeout,
     ResponseTooLarge,
     UnsupportedProtocol,
+    RemoteControlUnavailable,
     Internal,
 }
 
