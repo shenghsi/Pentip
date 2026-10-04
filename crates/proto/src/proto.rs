@@ -415,6 +415,10 @@ messages!(
     (ExternalAgentLoadingStatusUpdated, Background),
     (NewExternalAgentVersionAvailable, Background),
     (RemoteStarted, Background),
+    (RemoteTerminalControl, Background),
+    (RemoteTerminalControlResponse, Background),
+    (AllocateRemoteTerminalRegistration, Background),
+    (AllocateRemoteTerminalRegistrationResponse, Background),
     (GitGetWorktrees, Background),
     (GitGetHeadSha, Background),
     (GitGetHeadShaResponse, Background),
@@ -675,6 +679,11 @@ request_messages!(
     (GetAgentServerCommand, AgentServerCommand),
     (GetContextServerCommand, ContextServerCommand),
     (RemoteStarted, Ack),
+    (RemoteTerminalControl, RemoteTerminalControlResponse),
+    (
+        AllocateRemoteTerminalRegistration,
+        AllocateRemoteTerminalRegistrationResponse
+    ),
     (GitGetWorktrees, GitWorktreesResponse),
     (GitGetHeadSha, GitGetHeadShaResponse),
     (GitEditRef, Ack),

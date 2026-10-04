@@ -203,6 +203,22 @@ impl ControlRequest {
     }
 }
 
+/// The id under which a remote server knows one terminal of its host. The
+/// server derives it from the caller's process ancestry. A client never
+/// presents it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RemoteTerminalRegistrationId(pub String);
+
+/// What a remote server forwards to the application: the request of a
+/// process on the remote host, with the terminal that the server resolved
+/// for that process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteControlEnvelope {
+    pub remote_terminal_registration_id: RemoteTerminalRegistrationId,
+    pub control_request: ControlRequest,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "kebab-case")]
 pub enum ControlCommand {
@@ -404,6 +420,8 @@ pub enum ControlErrorCode {
     ResponseTooLarge,
     UnsupportedProtocol,
     RemoteControlUnavailable,
+    RemoteSessionStale,
+    RemoteVersionMismatch,
     Internal,
 }
 
@@ -489,6 +507,67 @@ mod tests {
         }
         for key in ["", "ctrl-", "not-a-key", "ctrl-not-a-key"] {
             assert!(!is_supported_terminal_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn remote_control_envelope_round_trips_with_current_request() {
+        let envelope = RemoteControlEnvelope {
+            remote_terminal_registration_id: RemoteTerminalRegistrationId(
+                "remote-terminal-1".to_string(),
+            ),
+            control_request: ControlRequest::current(ControlCommand::TerminalCurrent),
+        };
+
+        let encoded = serde_json::to_vec(&envelope).expect("failed to encode the envelope");
+        let decoded: RemoteControlEnvelope =
+            serde_json::from_slice(&encoded).expect("failed to decode the envelope");
+
+        assert_eq!(
+            decoded.remote_terminal_registration_id,
+            envelope.remote_terminal_registration_id
+        );
+        assert_eq!(decoded.control_request.protocol, PROTOCOL_VERSION);
+        assert!(matches!(
+            decoded.control_request.command,
+            ControlCommand::TerminalCurrent
+        ));
+    }
+
+    #[test]
+    fn remote_control_envelope_ignores_additive_fields() {
+        let json = r#"{
+            "remote_terminal_registration_id": "remote-terminal-1",
+            "control_request": {"protocol": {"major": 1, "minor": 99}, "command": "status"},
+            "added_later": true
+        }"#;
+
+        let envelope: RemoteControlEnvelope =
+            serde_json::from_str(json).expect("failed to decode the envelope");
+
+        assert_eq!(
+            envelope.remote_terminal_registration_id,
+            RemoteTerminalRegistrationId("remote-terminal-1".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_transport_errors_have_stable_names() {
+        for (code, name) in [
+            (
+                ControlErrorCode::RemoteControlUnavailable,
+                "remote-control-unavailable",
+            ),
+            (ControlErrorCode::RemoteSessionStale, "remote-session-stale"),
+            (
+                ControlErrorCode::RemoteVersionMismatch,
+                "remote-version-mismatch",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&code).expect("failed to encode the code"),
+                format!("\"{name}\"")
+            );
         }
     }
 
