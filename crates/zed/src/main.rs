@@ -720,6 +720,7 @@ fn main() {
             false,
             cx,
         );
+        agent_ui::init_agent_control(cx);
         zed::watch_user_agents_md(app_state.fs.clone(), cx);
 
         repl::init(app_state.fs.clone(), cx);
