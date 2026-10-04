@@ -11,7 +11,7 @@ On macOS or Linux, find the release-matched control executable:
 find "$HOME/Library/Application Support/Zed" "$HOME/.local/share/zed" -maxdepth 1 -name 'agent-control-*-executable.json' -exec cat {} \; 2>/dev/null
 ```
 
-The release-matched control socket is beside the marker and has the same `agent-control-<channel>` stem with a `.sock` suffix. If no matching marker or socket exists, continue the task without Pentip control. Pentip control is not available on Windows.
+On the machine that runs Pentip, the release-matched control socket is beside the marker and has the same `agent-control-<channel>` stem with a `.sock` suffix. In a Pentip remote project, the shell runs on the remote host: there is a marker but no socket, and the command reaches Pentip through the remote server. If no matching marker exists, or on the machine of Pentip no matching socket exists, continue the task without Pentip control. Pentip control is not available on Windows.
 
 Use the `executable` value from the marker as `<pentipctl>`. Do not assume that `pentipctl` is on `PATH`.
 

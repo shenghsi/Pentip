@@ -22,7 +22,15 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
+    if std::env::args_os().next().is_some_and(invokes_pentipctl) {
+        agent_control_cli::main_with_transport(remote_server::run_remote_control_client);
+        return Ok(());
+    }
+
     let cli = Cli::parse();
+    if let Err(error) = remote_server::install_remote_control_command() {
+        log::warn!("failed to install the remote pentipctl command: {error:#}");
+    }
 
     if let Some(socket_path) = &cli.askpass {
         askpass::main(socket_path);
@@ -59,5 +67,23 @@ fn main() -> anyhow::Result<()> {
             .write_all(b"usage: remote <run|proxy|version>\n")
             .ok();
         std::process::exit(1);
+    }
+}
+
+fn invokes_pentipctl(path: impl AsRef<std::ffi::OsStr>) -> bool {
+    PathBuf::from(path.as_ref())
+        .file_stem()
+        .is_some_and(|stem| stem == "pentipctl")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executable_name_selects_remote_control_mode() {
+        assert!(invokes_pentipctl("/remote/version/pentipctl"));
+        assert!(invokes_pentipctl("pentipctl.exe"));
+        assert!(!invokes_pentipctl("/remote/version/remote_server"));
     }
 }

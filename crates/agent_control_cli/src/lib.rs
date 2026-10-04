@@ -191,6 +191,29 @@ impl From<ReadSourceArg> for TerminalReadSource {
 }
 
 pub fn main() {
+    run_main(|request, socket_override| {
+        #[cfg(unix)]
+        return run(request, socket_override);
+        #[cfg(not(unix))]
+        {
+            let _ = socket_override;
+            run(request)
+        }
+    });
+}
+
+/// Runs the same command line with a different way to deliver the request.
+/// `pentipctl` on a remote host sends its request through the remote server
+/// instead of the local control socket.
+pub fn main_with_transport(
+    transport: impl FnOnce(ControlRequest) -> anyhow::Result<ControlResponse>,
+) {
+    run_main(|request, _socket_override| transport(request));
+}
+
+fn run_main(
+    transport: impl FnOnce(ControlRequest, Option<PathBuf>) -> anyhow::Result<ControlResponse>,
+) {
     let cli = Cli::parse();
     if let Some(result) = cli.run_local_command() {
         match result {
@@ -203,6 +226,8 @@ pub fn main() {
     }
     #[cfg(unix)]
     let socket_override = cli.socket.clone();
+    #[cfg(not(unix))]
+    let socket_override = None;
     let (request, wants_json) = match cli.into_request() {
         Ok(request) => request,
         Err(error) => {
@@ -211,12 +236,7 @@ pub fn main() {
         }
     };
 
-    #[cfg(unix)]
-    let result = run(request, socket_override);
-    #[cfg(not(unix))]
-    let result = run(request);
-
-    match result {
+    match transport(request, socket_override) {
         Ok(response) => std::process::exit(print_response(&response, wants_json)),
         Err(error) => {
             eprintln!("pentipctl: {error:#}");
@@ -491,6 +511,8 @@ fn error_code_name(code: agent_control_protocol::ControlErrorCode) -> &'static s
         ControlErrorCode::InvalidPlacement => "invalid-placement",
         ControlErrorCode::TerminalCreateFailed => "terminal-create-failed",
         ControlErrorCode::RemoteControlUnavailable => "remote-control-unavailable",
+        ControlErrorCode::RemoteSessionStale => "remote-session-stale",
+        ControlErrorCode::RemoteVersionMismatch => "remote-version-mismatch",
         ControlErrorCode::TerminalPlacementFailed => "terminal-placement-failed",
         ControlErrorCode::CursorExpired => "cursor-expired",
         ControlErrorCode::Timeout => "timeout",

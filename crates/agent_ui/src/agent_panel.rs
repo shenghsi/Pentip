@@ -5564,6 +5564,11 @@ impl AgentPanel {
     }
 
     #[cfg(unix)]
+    pub(crate) fn project_path_style(&self, cx: &App) -> util::paths::PathStyle {
+        self.project.read(cx).path_style(cx)
+    }
+
+    #[cfg(unix)]
     pub(crate) fn control_open_terminal(
         &mut self,
         working_directory: Option<PathBuf>,
