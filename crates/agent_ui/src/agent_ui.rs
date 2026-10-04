@@ -642,6 +642,13 @@ pub(crate) fn humanize_token_count(count: u64) -> String {
     }
 }
 
+/// Starts the agent control server. Separate from `init` because the
+/// server's `async-io` reactor thread violates the determinism checks of
+/// GPUI's test scheduler, so tests that call `init` must not start it.
+pub fn init_agent_control(cx: &mut App) {
+    agent_control::init(cx);
+}
+
 /// Initializes the `agent` crate.
 pub fn init(
     fs: Arc<dyn Fs>,
@@ -653,9 +660,6 @@ pub fn init(
 ) {
     RemoteAgentRoutingSettings::register(cx);
     agent::ThreadStore::init_global(cx);
-    if !is_eval {
-        agent_control::init(cx);
-    }
     prompt_store::init(cx);
 
     cx.set_global(agent_skills::SkillsUpdatedHook(std::rc::Rc::new(|cx| {

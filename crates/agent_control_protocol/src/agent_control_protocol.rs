@@ -4,6 +4,7 @@
 //! dependency-free of GPUI/terminal so the CLI binary stays small.
 
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
@@ -132,6 +133,7 @@ pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor:
 /// that crate: `release_channel` itself depends on `gpui`, which would drag
 /// the entire GPUI/rendering stack into `agent_control_cli`, defeating this
 /// crate's whole purpose of keeping that binary small.
+#[cfg(unix)]
 static RELEASE_CHANNEL_NAME: LazyLock<String> = LazyLock::new(|| {
     if cfg!(debug_assertions) {
         std::env::var("ZED_RELEASE_CHANNEL")
