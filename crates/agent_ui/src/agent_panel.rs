@@ -1278,6 +1278,7 @@ impl From<AgentThread> for BaseView {
     }
 }
 
+#[cfg(unix)]
 pub(crate) struct AgentControlTerminal {
     pub id: TerminalId,
     pub terminal: Entity<terminal::Terminal>,
@@ -5508,6 +5509,7 @@ impl AgentPanel {
         Some(new_pane)
     }
 
+    #[cfg(unix)]
     fn pane_showing_terminal(&self, terminal_id: TerminalId, cx: &App) -> Option<AgentPaneId> {
         if self.active_terminal_id() == Some(terminal_id) {
             Some(self.active_pane)
@@ -5537,6 +5539,7 @@ impl AgentPanel {
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn control_terminals(&self, cx: &App) -> Vec<AgentControlTerminal> {
         let mut terminals = self
             .terminals
@@ -5553,12 +5556,14 @@ impl AgentPanel {
         terminals
     }
 
+    #[cfg(unix)]
     /// Starts a shell terminal for an agent control request. Without
     /// `focus`, no pane shows the new terminal.
     pub(crate) fn is_local_project(&self, cx: &App) -> bool {
         self.project.read(cx).is_local()
     }
 
+    #[cfg(unix)]
     pub(crate) fn control_open_terminal(
         &mut self,
         working_directory: Option<PathBuf>,
@@ -5592,6 +5597,7 @@ impl AgentPanel {
         Ok(terminal_id)
     }
 
+    #[cfg(unix)]
     /// Adds a pane adjacent to the pane that shows `target` and starts a
     /// shell terminal in it, for an agent control request.
     pub(crate) fn control_split_terminal(
@@ -5645,6 +5651,7 @@ impl AgentPanel {
         Ok(terminal_id)
     }
 
+    #[cfg(unix)]
     /// Removes the pane that was reserved for a terminal that did not start.
     pub(crate) fn control_abandon_terminal(
         &mut self,
