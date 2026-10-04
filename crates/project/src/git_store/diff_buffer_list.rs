@@ -29,9 +29,13 @@ pub enum DiffBase {
     Index,
     Staged,
     /// Diffs the working tree against the merge base of the current branch and `base_ref` (three-dot diff).
-    Merge { base_ref: SharedString },
+    Merge {
+        base_ref: SharedString,
+    },
     /// Diffs the working tree directly against the tip of `base_ref` (two-dot diff).
-    Branch { base_ref: SharedString },
+    Branch {
+        base_ref: SharedString,
+    },
 }
 
 impl DiffBase {

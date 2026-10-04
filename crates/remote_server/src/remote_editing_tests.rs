@@ -290,6 +290,55 @@ async fn test_remote_buffer_path_swap(cx: &mut TestAppContext, server_cx: &mut T
     }
 }
 
+#[cfg(unix)]
+#[gpui::test]
+async fn test_remote_terminal_registration_allocation(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+    server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+    init_logger();
+
+    let server_fs = FakeFs::new(server_cx.executor());
+    let (opts, server_session, _) = RemoteClient::fake_server(cx, server_cx);
+    server_cx.update(HeadlessProject::init);
+    let headless = server_cx.new(|cx| {
+        HeadlessProject::new(
+            crate::HeadlessAppState {
+                session: server_session.clone(),
+                fs: server_fs.clone(),
+                http_client: Arc::new(BlockedHttpClient),
+                node_runtime: NodeRuntime::unavailable(),
+                languages: Arc::new(LanguageRegistry::new(cx.background_executor().clone())),
+                extension_host_proxy: Arc::new(ExtensionHostProxy::new()),
+                startup_time: std::time::Instant::now(),
+            },
+            false,
+            cx,
+        )
+    });
+    let registrations = server_cx
+        .update(|cx| crate::remote_control::register_allocation_handler(&server_session, cx));
+    let remote_client = RemoteClient::connect_mock(opts, cx).await;
+    drop(headless);
+    let proto_client = remote_client.read_with(cx, |client, _| client.proto_client());
+
+    let first = proto_client
+        .request(proto::AllocateRemoteTerminalRegistration {})
+        .await
+        .expect("failed to allocate the first registration");
+    let second = proto_client
+        .request(proto::AllocateRemoteTerminalRegistration {})
+        .await
+        .expect("failed to allocate the second registration");
+
+    assert!(!first.registration_id.is_empty());
+    assert_ne!(first.registration_id, second.registration_id);
+    assert!(!first.server_executable.is_empty());
+    assert_eq!(registrations.lock().len(), 2);
+}
+
 #[gpui::test]
 async fn test_remote_telemetry_event_forwarding(
     cx: &mut TestAppContext,

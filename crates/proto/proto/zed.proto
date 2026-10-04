@@ -530,7 +530,11 @@ message Envelope {
     StageManagedAgentInstallation stage_managed_agent_installation = 498;
     StageManagedAgentInstallationResponse stage_managed_agent_installation_response = 499;
     CommitManagedAgentInstallation commit_managed_agent_installation = 500;
-    CommitManagedAgentInstallationResponse commit_managed_agent_installation_response = 501; // current max
+    CommitManagedAgentInstallationResponse commit_managed_agent_installation_response = 501;
+    RemoteTerminalControl remote_terminal_control = 502;
+    RemoteTerminalControlResponse remote_terminal_control_response = 503;
+    AllocateRemoteTerminalRegistration allocate_remote_terminal_registration = 504;
+    AllocateRemoteTerminalRegistrationResponse allocate_remote_terminal_registration_response = 505; // current max
   }
 
   reserved 87 to 88;
@@ -608,6 +612,23 @@ message FlushBufferedMessages {}
 message FlushBufferedMessagesResponse {}
 
 message RemoteStarted {}
+
+message RemoteTerminalControl {
+  bytes envelope = 1;
+}
+
+message RemoteTerminalControlResponse {
+  bytes response = 1;
+}
+
+message AllocateRemoteTerminalRegistration {}
+
+// An empty `registration_id` means that the server cannot register terminals
+// for control, for example on a platform without the control endpoint.
+message AllocateRemoteTerminalRegistrationResponse {
+  string registration_id = 1;
+  string server_executable = 2;
+}
 
 message SpawnKernel {
   string kernel_name = 1;
