@@ -9800,6 +9800,7 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     async fn test_terminal_shows_in_a_background_pane_without_focus(cx: &mut TestAppContext) {
         let (panel, mut cx) = setup_panel(cx).await;
