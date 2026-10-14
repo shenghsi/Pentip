@@ -9084,6 +9084,25 @@ fn ai_page(cx: &App) -> SettingsPage {
                 metadata: None,
                 files: USER,
             }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Scan External Agent Sessions",
+                description: "Whether thread history lists Codex, Claude, and Pi sessions that were created outside of Pentip, found in the agents' own session folders for the current project.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.scan_external_agent_sessions"),
+                    pick: |settings_content| {
+                        settings_content.agent.as_ref()?.scan_external_agent_sessions.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent
+                            .get_or_insert_default()
+                            .scan_external_agent_sessions = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
         ]);
 
         items.extend([
