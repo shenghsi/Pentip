@@ -362,12 +362,6 @@ pub struct AgentSettingsContent {
     ///
     /// Default: true
     pub show_merge_conflict_indicator: Option<bool>,
-    /// Whether thread history lists sessions of terminal agents (Codex, Claude, Pi) that were
-    /// created outside of Pentip, found by scanning the agents' own session folders for the
-    /// current project.
-    ///
-    /// Default: false
-    pub scan_external_agent_sessions: Option<bool>,
     /// Per-tool permission rules for granular control over which tool actions
     /// require confirmation.
     ///

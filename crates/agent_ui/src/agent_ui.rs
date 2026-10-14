@@ -1083,7 +1083,6 @@ mod tests {
             sandbox_permissions: Default::default(),
             show_turn_stats: false,
             show_merge_conflict_indicator: true,
-            scan_external_agent_sessions: false,
             sidebar_side: Default::default(),
             threads_sidebar_default_width: px(300.),
             thinking_display: Default::default(),

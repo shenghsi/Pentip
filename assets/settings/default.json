@@ -1383,12 +1383,6 @@
     //
     // Default: true
     "show_merge_conflict_indicator": true,
-    // Whether thread history lists sessions of terminal agents (Codex, Claude, Pi)
-    // that were created outside of Pentip, found by scanning the agents' own
-    // session folders for the current project.
-    //
-    // Default: false
-    "scan_external_agent_sessions": false,
   },
   // Whether the screen sharing icon is shown in the os status bar.
   "show_call_status_icon": true,

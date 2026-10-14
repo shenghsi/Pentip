@@ -305,12 +305,9 @@ impl ThreadsArchiveView {
             _load_cli_history_task: Task::ready(()),
         };
 
-        let scan_external_sessions = AgentSettings::get_global(cx).scan_external_agent_sessions;
-        if scan_external_sessions {
-            this.load_codex_history(cx);
-            this.load_claude_history(cx);
-        }
-        this.load_cli_history(scan_external_sessions, cx);
+        this.load_codex_history(cx);
+        this.load_claude_history(cx);
+        this.load_cli_history(cx);
         this.update_items(cx);
         this.reload_branch_names_if_threads_changed(cx);
         this
@@ -521,7 +518,7 @@ impl ThreadsArchiveView {
         });
     }
 
-    fn load_cli_history(&mut self, scan_external_sessions: bool, cx: &mut Context<Self>) {
+    fn load_cli_history(&mut self, cx: &mut Context<Self>) {
         let Ok(project_data) = self.workspace.read_with(cx, |workspace, cx| {
             let project = workspace.project().read(cx);
             project.is_local().then(|| {
@@ -539,6 +536,7 @@ impl ThreadsArchiveView {
         else {
             return;
         };
+        let agy_working_directory = project_paths[0].clone();
         let environment =
             environment.update(cx, |environment, cx| environment.default_environment(cx));
         self.loading_cli_history = true;
@@ -550,14 +548,11 @@ impl ThreadsArchiveView {
                 .filter(|path| !path.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| paths::home_dir().join(".pi/agent"));
+            let agy_home = paths::home_dir().join(".gemini/antigravity");
             let result = cx
                 .background_spawn(async move {
-                    let mut sessions = if scan_external_sessions {
-                        load_pi_history(&pi_home, &project_paths)?
-                    } else {
-                        Vec::new()
-                    };
-                    sessions.extend(load_agy_history(&project_paths)?);
+                    let mut sessions = load_pi_history(&pi_home, &project_paths)?;
+                    sessions.extend(load_agy_history(&agy_home, &agy_working_directory)?);
                     anyhow::Ok(sessions)
                 })
                 .await;
