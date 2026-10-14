@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use collections::HashMap;
 use gpui::{App, AppContext as _, Context, Entity, Task, WeakEntity};
 
@@ -15,11 +15,12 @@ use std::{
 };
 use task::{Shell, ShellBuilder, ShellKind, SpawnInTerminal};
 use terminal::{
-    Terminal, TerminalBuilder, TerminalMode, insert_zed_terminal_env,
-    terminal_settings::TerminalSettings,
+    RemoteTerminalControlRegistration, Terminal, TerminalBuilder, TerminalMode,
+    insert_zed_terminal_env, terminal_settings::TerminalSettings,
 };
 use util::{
-    command::new_std_command, get_default_system_shell, get_system_shell, maybe, rel_path::RelPath,
+    ResultExt as _, command::new_std_command, get_default_system_shell, get_system_shell, maybe,
+    rel_path::RelPath,
 };
 
 use crate::{Project, ProjectPath};
@@ -189,6 +190,7 @@ impl Project {
                                         env,
                                         path,
                                         remote_client,
+                                        None,
                                         cx,
                                     )?
                                 }
@@ -200,6 +202,7 @@ impl Project {
                                     env,
                                     path,
                                     remote_client,
+                                    None,
                                     cx,
                                 )?,
                             },
@@ -377,6 +380,23 @@ impl Project {
             let mut env = env_task.await.unwrap_or_default();
             env.extend(settings.env);
 
+            let remote_control = match &remote_client {
+                Some(remote_client) => allocate_remote_control(remote_client, cx)
+                    .await
+                    .context("failed to allocate remote terminal control registration")
+                    .log_err()
+                    .flatten(),
+                None => None,
+            };
+            let remote_control_registration = remote_control.as_ref().and_then(|control| {
+                remote_client
+                    .as_ref()
+                    .map(|remote_client| RemoteTerminalControlRegistration {
+                        remote_connection_id: remote_client.entity_id().as_u64(),
+                        remote_terminal_registration_id: control.registration_id.clone(),
+                    })
+            });
+
             let activation_script = maybe!(async {
                 for toolchain in toolchains {
                     let Some(toolchain) = toolchain.await else {
@@ -400,9 +420,14 @@ impl Project {
                 .update(cx, move |_, cx| {
                     let (shell, env) = {
                         match remote_client {
-                            Some(remote_client) => {
-                                create_remote_shell(None, env, path, remote_client, cx)?
-                            }
+                            Some(remote_client) => create_remote_shell(
+                                None,
+                                env,
+                                path,
+                                remote_client,
+                                remote_control,
+                                cx,
+                            )?,
                             None => (settings.shell, env),
                         }
                     };
@@ -425,6 +450,7 @@ impl Project {
                 })??
                 .await?;
             project.update(cx, move |this, cx| {
+                let builder = builder.with_remote_control_registration(remote_control_registration);
                 let terminal_handle = cx.new(|cx| builder.subscribe(cx));
 
                 this.terminals
@@ -605,18 +631,94 @@ impl Project {
     }
 }
 
+struct RemoteControl {
+    registration_id: String,
+    server_executable: String,
+}
+
+/// Asks the remote server for an id under which the control endpoint of the
+/// server will know the next terminal. Returns `None` when the server cannot
+/// register terminals, for example on Windows hosts.
+async fn allocate_remote_control(
+    remote_client: &Entity<RemoteClient>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<Option<RemoteControl>> {
+    if !cfg!(unix) {
+        return Ok(None);
+    }
+    let allocation = remote_client.read_with(cx, |remote_client, _cx| {
+        remote_client
+            .proto_client()
+            .request(rpc::proto::AllocateRemoteTerminalRegistration {})
+    });
+    let response = allocation.await?;
+    if response.registration_id.is_empty() || response.server_executable.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(RemoteControl {
+        registration_id: response.registration_id,
+        server_executable: response.server_executable,
+    }))
+}
+
+/// Runs the shell below a process that registered itself with the remote
+/// server. The server finds the caller of a control request by walking up
+/// its process ancestry to that registered process.
+fn wrap_remote_terminal_command(
+    shell_kind: ShellKind,
+    remote_shell: &str,
+    server_executable: &str,
+    registration_id: &str,
+) -> Result<(String, Vec<String>)> {
+    let server_executable = shell_kind
+        .try_quote(server_executable)
+        .context("remote server executable cannot be quoted")?;
+    let server_executable = shell_kind.prepend_command_prefix(&server_executable);
+    let registration_id = shell_kind
+        .try_quote(registration_id)
+        .context("remote terminal registration id cannot be quoted")?;
+    let remote_shell_quoted = shell_kind
+        .try_quote(remote_shell)
+        .context("remote shell executable cannot be quoted")?;
+    let remote_shell_quoted = shell_kind.prepend_command_prefix(&remote_shell_quoted);
+    let separator = shell_kind.sequential_commands_separator();
+    // The shell stays a login shell, as it is without registration.
+    let command = format!(
+        "{server_executable} register-terminal --registration-id {registration_id}{separator} {remote_shell_quoted} -l"
+    );
+    Ok((
+        remote_shell.to_string(),
+        shell_kind.args_for_shell(false, command),
+    ))
+}
+
 fn create_remote_shell(
     spawn_command: Option<(&String, &Vec<String>)>,
     mut env: HashMap<String, String>,
     working_directory: Option<Arc<Path>>,
     remote_client: Entity<RemoteClient>,
+    remote_control: Option<RemoteControl>,
     cx: &mut App,
 ) -> Result<(Shell, HashMap<String, String>)> {
     insert_zed_terminal_env(&mut env, &release_channel::AppVersion::global(cx));
 
-    let (program, args) = match spawn_command {
-        Some((program, args)) => (Some(program.clone()), args),
-        None => (None, &Vec::new()),
+    let (program, args) = match (spawn_command, remote_control) {
+        (Some((program, args)), _) => (Some(program.clone()), args.clone()),
+        (None, Some(remote_control)) => {
+            let remote_client = remote_client.read(cx);
+            let remote_shell = remote_client
+                .shell()
+                .unwrap_or_else(get_default_system_shell);
+            let shell_kind = ShellKind::new(&remote_shell, remote_client.path_style().is_windows());
+            let (program, args) = wrap_remote_terminal_command(
+                shell_kind,
+                &remote_shell,
+                &remote_control.server_executable,
+                &remote_control.registration_id,
+            )?;
+            (Some(program), args)
+        }
+        (None, None) => (None, Vec::new()),
     };
 
     let command = remote_client.read(cx).build_command(
@@ -773,6 +875,26 @@ mod tests {
         assert_eq!(
             format_task_for_activation(&task, ShellKind::PowerShell, "powershell.exe", true),
             "&cmd.exe /S /C '\"echo It''s fine\"'"
+        );
+    }
+
+    #[test]
+    fn wraps_a_posix_shell_below_a_registration_command() {
+        let (program, args) = wrap_remote_terminal_command(
+            ShellKind::Posix,
+            "/bin/bash",
+            "/home/user/.zed_server/remote server",
+            "registration-1",
+        )
+        .expect("failed to wrap the command");
+
+        assert_eq!(program, "/bin/bash");
+        assert_eq!(
+            args,
+            vec![
+                "-c".to_string(),
+                "'/home/user/.zed_server/remote server' register-terminal --registration-id registration-1; /bin/bash -l".to_string()
+            ]
         );
     }
 

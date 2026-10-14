@@ -23,6 +23,8 @@ test-support = ["fs/test-support"]
 
 [dependencies]
 acp_thread.workspace = true
+agent_control_cli.workspace = true
+agent_control_protocol.workspace = true
 agent.workspace = true
 anyhow.workspace = true
 async-compression.workspace = true
@@ -55,6 +57,7 @@ log.workspace = true
 lsp.workspace = true
 net.workspace = true
 node_runtime.workspace = true
+parking_lot.workspace = true
 paths.workspace = true
 project.workspace = true
 proto.workspace = true
@@ -79,6 +82,9 @@ worktree.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
 uuid = { workspace = true, features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

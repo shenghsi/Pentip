@@ -41,15 +41,16 @@ mod server {
 
     use agent_control_protocol::{
         ControlCommand, ControlErrorCode, ControlRequest, ControlResponse, ControlSuccess,
-        FRAME_LENGTH_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PROTOCOL_VERSION, StatusResult,
-        TerminalControlId, TerminalMetadata, TerminalOpenRequest, TerminalOutputMatcher,
-        TerminalReadRequest, TerminalReadSource, TerminalRunRequest, TerminalSendKeyRequest,
-        TerminalSendTextRequest, TerminalSnapshot, TerminalSplitRequest, TerminalWaitOutputRequest,
-        frame_payload,
+        FRAME_LENGTH_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PROTOCOL_VERSION,
+        RemoteControlEnvelope, RemoteTerminalRegistrationId, StatusResult, TerminalControlId,
+        TerminalMetadata, TerminalOpenRequest, TerminalOutputMatcher, TerminalReadRequest,
+        TerminalReadSource, TerminalRunRequest, TerminalSendKeyRequest, TerminalSendTextRequest,
+        TerminalSnapshot, TerminalSplitRequest, TerminalWaitOutputRequest, frame_payload,
     };
     use anyhow::{Context as _, Result};
     use collections::HashMap;
     use gpui::{AnyWindowHandle, App, AppContext as _, AsyncApp, Entity, Global, Keystroke, Task};
+    use rpc::proto;
     use settings::Settings as _;
     use smol::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use smol::net::unix::{UnixListener, UnixStream};
@@ -91,6 +92,34 @@ mod server {
         if cx.has_global::<ControlServer>() {
             return;
         }
+        cx.observe_new(|remote_client: &mut remote::RemoteClient, _window, cx| {
+            let remote_client_id = cx.entity_id().as_u64();
+            remote_client.proto_client().add_request_handler(
+                cx.weak_entity(),
+                move |_remote_client,
+                      envelope: rpc::TypedEnvelope<proto::RemoteTerminalControl>,
+                      mut cx| async move {
+                    let response = handle_remote_request(
+                        remote_client_id,
+                        &envelope.payload.envelope,
+                        &mut cx,
+                    )
+                    .await;
+                    let response = serde_json::to_vec(&response)?;
+                    if response.len() > MAX_RESPONSE_BYTES {
+                        return Ok(proto::RemoteTerminalControlResponse {
+                            response: serde_json::to_vec(&ControlResponse::error(
+                                ControlErrorCode::ResponseTooLarge,
+                                "remote terminal control response exceeds the byte limit",
+                            ))?,
+                        });
+                    }
+                    Ok(proto::RemoteTerminalControlResponse { response })
+                },
+            );
+        })
+        .detach();
+
         let socket_path = agent_control_protocol::socket_path();
         write_executable_location(&agent_control_protocol::executable_location_path());
         let owns_socket = Arc::new(AtomicBool::new(false));
@@ -170,6 +199,26 @@ mod server {
                 }
             })
             .detach();
+        }
+    }
+
+    async fn handle_remote_request(
+        remote_client_id: u64,
+        envelope: &[u8],
+        cx: &mut AsyncApp,
+    ) -> ControlResponse {
+        if envelope.len() > MAX_REQUEST_BYTES {
+            return ControlResponse::error(
+                ControlErrorCode::InvalidRequest,
+                "remote terminal control request exceeds the byte limit",
+            );
+        }
+        match serde_json::from_slice::<RemoteControlEnvelope>(envelope) {
+            Ok(envelope) => dispatch_remote(remote_client_id, &envelope, cx).await,
+            Err(error) => ControlResponse::error(
+                ControlErrorCode::InvalidRequest,
+                format!("remote terminal control request is malformed: {error}"),
+            ),
         }
     }
 
@@ -288,37 +337,83 @@ mod server {
         request: &ControlRequest,
         cx: &mut AsyncApp,
     ) -> ControlResponse {
-        if request.protocol.major != PROTOCOL_VERSION.major {
-            return ControlResponse::error(
-                ControlErrorCode::UnsupportedProtocol,
-                format!(
-                    "unsupported protocol major {}; server supports {}",
-                    request.protocol.major, PROTOCOL_VERSION.major
-                ),
-            );
+        if let Some(response) = reject_unsupported_protocol(request) {
+            return response;
         }
         if matches!(request.command, ControlCommand::Status) {
-            let (app_version, release_channel) = cx.update(|cx| {
-                (
-                    release_channel::AppVersion::global(cx).to_string(),
-                    release_channel::ReleaseChannel::try_global(cx)
-                        .unwrap_or(*release_channel::RELEASE_CHANNEL)
-                        .dev_name()
-                        .to_string(),
-                )
-            });
-            return ControlResponse::ok(ControlSuccess::Status(StatusResult {
-                app_version,
-                protocol_version: PROTOCOL_VERSION,
-                release_channel,
-                capabilities: command_capabilities(),
-            }));
+            return status_response(cx);
         }
 
         let Some(caller) = resolve_caller(peer_pid, cx).await else {
             return ControlResponse::not_ready();
         };
+        dispatch_for_caller(&caller, request, cx).await
+    }
 
+    /// Handles a request that a remote server forwarded for a process in one
+    /// of its terminals. `remote_client_id` is the connection that the
+    /// request arrived on, so a server can name only terminals that it
+    /// started itself.
+    async fn dispatch_remote(
+        remote_client_id: u64,
+        envelope: &RemoteControlEnvelope,
+        cx: &mut AsyncApp,
+    ) -> ControlResponse {
+        let request = &envelope.control_request;
+        if let Some(response) = reject_unsupported_protocol(request) {
+            return response;
+        }
+        let Some(caller) = resolve_remote_caller(
+            remote_client_id,
+            &envelope.remote_terminal_registration_id,
+            cx,
+        ) else {
+            return ControlResponse::error(
+                ControlErrorCode::RemoteSessionStale,
+                "remote terminal registration is not live on this connection",
+            );
+        };
+        if matches!(request.command, ControlCommand::Status) {
+            return status_response(cx);
+        }
+        dispatch_for_caller(&caller, request, cx).await
+    }
+
+    fn reject_unsupported_protocol(request: &ControlRequest) -> Option<ControlResponse> {
+        (request.protocol.major != PROTOCOL_VERSION.major).then(|| {
+            ControlResponse::error(
+                ControlErrorCode::UnsupportedProtocol,
+                format!(
+                    "unsupported protocol major {}; server supports {}",
+                    request.protocol.major, PROTOCOL_VERSION.major
+                ),
+            )
+        })
+    }
+
+    fn status_response(cx: &mut AsyncApp) -> ControlResponse {
+        let (app_version, release_channel) = cx.update(|cx| {
+            (
+                release_channel::AppVersion::global(cx).to_string(),
+                release_channel::ReleaseChannel::try_global(cx)
+                    .unwrap_or(*release_channel::RELEASE_CHANNEL)
+                    .dev_name()
+                    .to_string(),
+            )
+        });
+        ControlResponse::ok(ControlSuccess::Status(StatusResult {
+            app_version,
+            protocol_version: PROTOCOL_VERSION,
+            release_channel,
+            capabilities: command_capabilities(),
+        }))
+    }
+
+    async fn dispatch_for_caller(
+        caller: &Caller,
+        request: &ControlRequest,
+        cx: &mut AsyncApp,
+    ) -> ControlResponse {
         match &request.command {
             ControlCommand::Status => error_response("status needs no caller"),
             ControlCommand::TerminalCurrent => cx.update(|cx| {
@@ -366,6 +461,12 @@ mod server {
                 let Some(panel) = panel.upgrade() else {
                     continue;
                 };
+                // The shell of a remote project's terminal runs on another
+                // host. The process of such a terminal here is only its
+                // connection, so it is no ancestor of a local caller.
+                if !panel.read(cx).is_local_project(cx) {
+                    continue;
+                }
                 for terminal in panel.read(cx).control_terminals(cx) {
                     let Some(pid) = terminal.terminal.read(cx).pid() else {
                         continue;
@@ -389,6 +490,42 @@ mod server {
             .background_spawn(async move { walk_ancestry_for_match(peer_pid, &tracked_pids) })
             .await?;
         callers.into_iter().nth(index)
+    }
+
+    /// Finds the terminal that a remote server registered under
+    /// `registration_id` on the connection `remote_client_id`.
+    fn resolve_remote_caller(
+        remote_client_id: u64,
+        registration_id: &RemoteTerminalRegistrationId,
+        cx: &mut AsyncApp,
+    ) -> Option<Caller> {
+        cx.update(|cx| {
+            let panels = cx.try_global::<ControlPanels>()?;
+            panels.0.iter().find_map(|(panel, window)| {
+                let panel = panel.upgrade()?;
+                let terminal_id = panel
+                    .read(cx)
+                    .control_terminals(cx)
+                    .into_iter()
+                    .find(|terminal| {
+                        terminal
+                            .terminal
+                            .read(cx)
+                            .remote_control_registration()
+                            .is_some_and(|registration| {
+                                registration.remote_connection_id == remote_client_id
+                                    && registration.remote_terminal_registration_id
+                                        == registration_id.0
+                            })
+                    })?
+                    .id;
+                Some(Caller {
+                    panel,
+                    window: *window,
+                    terminal_id,
+                })
+            })
+        })
     }
 
     fn walk_ancestry_for_match(peer_pid: u32, tracked_pids: &HashMap<u32, usize>) -> Option<usize> {
@@ -467,30 +604,33 @@ mod server {
         Ok(terminal)
     }
 
-    /// Terminal control reaches only terminals of the local machine. A remote
-    /// project's terminal runs its shell on the remote host, where this
-    /// server and its working-directory checks do not apply.
-    fn ensure_local_project(caller: &Caller, cx: &AsyncApp) -> Result<(), Box<ControlResponse>> {
-        let is_local = cx.update(|cx| caller.panel.read(cx).is_local_project(cx));
-        if is_local {
+    /// A local path is checked against the local file system. The file
+    /// system of a remote project is on another host, so only the form of
+    /// its path is checked here; the remote shell reports a missing directory.
+    fn validate_working_directory(
+        caller: &Caller,
+        cwd: Option<&Path>,
+        cx: &AsyncApp,
+    ) -> Result<(), Box<ControlResponse>> {
+        let Some(cwd) = cwd else {
+            return Ok(());
+        };
+        let valid = cx.update(|cx| {
+            let panel = caller.panel.read(cx);
+            match panel.is_local_project(cx) {
+                true => cwd.is_absolute() && cwd.is_dir(),
+                false => cwd
+                    .to_str()
+                    .is_some_and(|cwd| util::paths::is_absolute(cwd, panel.project_path_style(cx))),
+            }
+        });
+        if valid {
             return Ok(());
         }
         Err(Box::new(ControlResponse::error(
-            ControlErrorCode::RemoteControlUnavailable,
-            "agent control is not supported for remote projects",
+            ControlErrorCode::InvalidWorkingDirectory,
+            format!("{} is not an absolute existing directory", cwd.display()),
         )))
-    }
-
-    fn validate_working_directory(cwd: Option<&Path>) -> Result<(), Box<ControlResponse>> {
-        if let Some(cwd) = cwd
-            && (!cwd.is_absolute() || !cwd.is_dir())
-        {
-            return Err(Box::new(ControlResponse::error(
-                ControlErrorCode::InvalidWorkingDirectory,
-                format!("{} is not an absolute existing directory", cwd.display()),
-            )));
-        }
-        Ok(())
     }
 
     fn usable_working_directory(terminal: &Entity<Terminal>, cx: &App) -> Option<PathBuf> {
@@ -505,10 +645,7 @@ mod server {
         request: &TerminalOpenRequest,
         cx: &mut AsyncApp,
     ) -> ControlResponse {
-        if let Err(response) = ensure_local_project(caller, cx) {
-            return *response;
-        }
-        if let Err(response) = validate_working_directory(request.cwd.as_deref()) {
+        if let Err(response) = validate_working_directory(caller, request.cwd.as_deref(), cx) {
             return *response;
         }
         let creation = caller.window.update(cx, |_, window, cx| {
@@ -545,10 +682,7 @@ mod server {
                 );
             }
         };
-        if let Err(response) = ensure_local_project(caller, cx) {
-            return *response;
-        }
-        if let Err(response) = validate_working_directory(request.cwd.as_deref()) {
+        if let Err(response) = validate_working_directory(caller, request.cwd.as_deref(), cx) {
             return *response;
         }
         let target = if request.current {

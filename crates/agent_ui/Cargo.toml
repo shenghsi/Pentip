@@ -96,6 +96,7 @@ regex.workspace = true
 release_channel.workspace = true
 remote.workspace = true
 remote_connection.workspace = true
+rpc.workspace = true
 rope.workspace = true
 sandbox.workspace = true
 schemars.workspace = true
