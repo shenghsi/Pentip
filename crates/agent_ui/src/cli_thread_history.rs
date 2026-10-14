@@ -108,19 +108,10 @@ fn pi_message_title(content: &serde_json::Value) -> Option<String> {
     })
 }
 
-pub(crate) fn load_agy_history(
-    agy_home: &Path,
-    working_directory: &Path,
-) -> anyhow::Result<Vec<CliSession>> {
+pub(crate) fn load_agy_history(project_paths: &[PathBuf]) -> anyhow::Result<Vec<CliSession>> {
+    let project_paths = canonical_paths(project_paths);
     let mut sessions = HashMap::new();
-    for directory_name in ["conversations", "implicit"] {
-        read_agy_sessions(
-            &agy_home.join(directory_name),
-            working_directory,
-            &mut sessions,
-        )?;
-    }
-    read_saved_agy_sessions(working_directory, &mut sessions)?;
+    read_saved_agy_sessions(&project_paths, &mut sessions)?;
     Ok(sessions.into_values().collect())
 }
 
@@ -164,7 +155,7 @@ pub fn save_agy_session(metadata: &TerminalThreadMetadata) -> anyhow::Result<()>
 }
 
 fn read_saved_agy_sessions(
-    project_path: &Path,
+    project_paths: &[PathBuf],
     sessions: &mut HashMap<uuid::Uuid, CliSession>,
 ) -> anyhow::Result<()> {
     let file = match File::open(saved_agy_history_path()) {
@@ -176,7 +167,7 @@ fn read_saved_agy_sessions(
         let Ok(record) = serde_json::from_str::<SavedAgySession>(&line?) else {
             continue;
         };
-        if !matches_project(&record.working_directory, &[project_path.to_path_buf()]) {
+        if !matches_project(&record.working_directory, project_paths) {
             continue;
         }
         sessions.insert(
@@ -189,49 +180,6 @@ fn read_saved_agy_sessions(
                 program: "agy",
             },
         );
-    }
-    Ok(())
-}
-
-fn read_agy_sessions(
-    directory: &Path,
-    working_directory: &Path,
-    sessions: &mut HashMap<uuid::Uuid, CliSession>,
-) -> anyhow::Result<()> {
-    let entries = match std::fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if !entry.file_type()?.is_file()
-            || !path.extension().is_some_and(|extension| extension == "pb")
-        {
-            continue;
-        }
-        let Some(id) = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|value| uuid::Uuid::parse_str(value).ok())
-        else {
-            continue;
-        };
-        let modified = entry.metadata()?.modified()?;
-        let session = CliSession {
-            id,
-            title: "Antigravity".into(),
-            working_directory: working_directory.to_path_buf(),
-            updated_at: DateTime::<Utc>::from(modified),
-            program: "agy",
-        };
-        if sessions
-            .get(&id)
-            .is_none_or(|existing| existing.updated_at < session.updated_at)
-        {
-            sessions.insert(id, session);
-        }
     }
     Ok(())
 }
@@ -280,41 +228,6 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].title, "Fix history");
         assert_eq!(history[0].id, id);
-        Ok(())
-    }
-
-    #[test]
-    fn agy_history_uses_conversation_file_metadata() -> anyhow::Result<()> {
-        let directory = tempfile::tempdir()?;
-        let conversations = directory.path().join("conversations");
-        std::fs::create_dir_all(&conversations)?;
-        let id = uuid::Uuid::new_v4();
-        std::fs::write(conversations.join(format!("{id}.pb")), [1, 2, 3])?;
-        let history = load_agy_history(directory.path(), directory.path())?;
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].id, id);
-        assert_eq!(history[0].program, "agy");
-        Ok(())
-    }
-
-    #[test]
-    fn agy_history_reads_implicit_sessions_and_deduplicates_ids() -> anyhow::Result<()> {
-        let directory = tempfile::tempdir()?;
-        let conversations = directory.path().join("conversations");
-        let implicit = directory.path().join("implicit");
-        std::fs::create_dir_all(&conversations)?;
-        std::fs::create_dir_all(&implicit)?;
-        let id = uuid::Uuid::new_v4();
-        std::fs::write(conversations.join(format!("{id}.pb")), [1])?;
-        std::fs::write(implicit.join(format!("{id}.pb")), [2])?;
-        let implicit_id = uuid::Uuid::new_v4();
-        std::fs::write(implicit.join(format!("{implicit_id}.pb")), [3])?;
-
-        let history = load_agy_history(directory.path(), directory.path())?;
-
-        assert_eq!(history.len(), 2);
-        assert!(history.iter().any(|session| session.id == id));
-        assert!(history.iter().any(|session| session.id == implicit_id));
         Ok(())
     }
 }

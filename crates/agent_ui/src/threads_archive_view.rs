@@ -536,7 +536,6 @@ impl ThreadsArchiveView {
         else {
             return;
         };
-        let agy_working_directory = project_paths[0].clone();
         let environment =
             environment.update(cx, |environment, cx| environment.default_environment(cx));
         self.loading_cli_history = true;
@@ -548,11 +547,10 @@ impl ThreadsArchiveView {
                 .filter(|path| !path.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| paths::home_dir().join(".pi/agent"));
-            let agy_home = paths::home_dir().join(".gemini/antigravity");
             let result = cx
                 .background_spawn(async move {
                     let mut sessions = load_pi_history(&pi_home, &project_paths)?;
-                    sessions.extend(load_agy_history(&agy_home, &agy_working_directory)?);
+                    sessions.extend(load_agy_history(&project_paths)?);
                     anyhow::Ok(sessions)
                 })
                 .await;
